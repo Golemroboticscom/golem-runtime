@@ -116,10 +116,23 @@ made there. Measured, all four:
 | `agents.csv` | **not a copy.** Different header, different meaning — `id, agent, team, engine, tools, mounts, network, secrets, image` against the old `agent_id, Agent, Sub-agent, Status, Mission, …`. This is the runtime's own definition and it stays. |
 | `agent_tools.csv` | **not a copy — worse, a name collision.** It was called `tools.csv`, and the old tree has a `tools.csv` that is a completely different table: an accounts ledger with provider, cost tier, quota and key reference. Two meanings, one name, in two trees. |
 
-**Done.** `flow.csv` keeps only the 48 design-robot rows and drops five flows the runtime
-never reads; `flow_params.csv` keeps 6 of 18. When a flow moves to this runtime its rows
-move with it — they are not mirrored ahead of time. And `tools.csv` was renamed
-`agent_tools.csv`, because one name for two meanings is how the wrong file gets copied.
+**I trimmed `flow.csv` to design-robot and Yakov reversed it: "no, it should stay exactly the
+same, because everything has to be built" (#6548). He is right and the trim is undone.** All
+six flows are work this runtime will do; the table is the plan, not a mirror, and the rows are
+there because they are next -- not because they were copied. `flow_params.csv` went back with
+it, since parameters without their flow are not a definition of anything.
+
+**The distinction that survives, and it is the reason `control_values.csv` stays trimmed:** the
+sixty control rows describe mechanisms this runtime does not have and may never have -- a
+dispatcher queue, the old bridge's message splitting, a stagnation detector. They are another
+system's numbers. The five other flows are *this* system's future work. A plan is not a copy.
+
+**`tools.csv` was renamed `agent_tools.csv`** and that stands: one name for two meanings is how
+the wrong file gets copied.
+
+**What replaces the trim, and it is better:** the `tables-preflight` gate reports every flow
+that does not validate on every push. Three do not (section 11). They are now visible on each
+commit instead of quietly deleted.
 
 ## 11. Three flows other than design-robot did not pass preflight
 
