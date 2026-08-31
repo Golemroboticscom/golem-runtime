@@ -17,7 +17,11 @@ FLOW_CSV = TABLES_DIR / "flow.csv"
 AGENTS_CSV = TABLES_DIR / "agents.csv"
 PARAMS_CSV = TABLES_DIR / "flow_params.csv"
 CONTROLS_CSV = TABLES_DIR / "control_values.csv"
-TOOLS_CSV = TABLES_DIR / "tools.csv"
+# NOT `tools.csv`. The old tree has a file of that name and it is a DIFFERENT table --
+# an accounts and integrations ledger (provider, cost tier, quota, key reference). This
+# one is the catalogue of what an agent may DO. One name for two meanings is how the
+# wrong file gets copied, so this one says which it is.
+TOOLS_CSV = TABLES_DIR / "agent_tools.csv"
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:

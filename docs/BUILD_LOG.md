@@ -104,10 +104,28 @@ all -- it must name up to 50 domains. There is no button.
 and from the credential file. Web search still works two ways that do not depend on it:
 the provider's own `WebSearch`, and `ImageSearch` on DuckDuckGo, which needs no key.
 
-## 10. Three flows other than design-robot do not pass preflight
+## 10. The copied tables — Yakov asked, and two of four had the same fault
 
-Found by the preflight, reported by the `tables-preflight` gate, **not fixed** — they are table
-findings and belong to Yakov, not to this build:
+He asked which other tables were copied from the old tree and whether the same mistake was
+made there. Measured, all four:
+
+| table | verdict |
+| --- | --- |
+| `flow.csv` | **byte-identical copy** of `_meta/dispatch/flow_table_unified.csv`, 74 rows. Same fault, and the largest one. |
+| `flow_params.csv` | **byte-identical copy**, 18 rows. Same fault. |
+| `agents.csv` | **not a copy.** Different header, different meaning — `id, agent, team, engine, tools, mounts, network, secrets, image` against the old `agent_id, Agent, Sub-agent, Status, Mission, …`. This is the runtime's own definition and it stays. |
+| `agent_tools.csv` | **not a copy — worse, a name collision.** It was called `tools.csv`, and the old tree has a `tools.csv` that is a completely different table: an accounts ledger with provider, cost tier, quota and key reference. Two meanings, one name, in two trees. |
+
+**Done.** `flow.csv` keeps only the 48 design-robot rows and drops five flows the runtime
+never reads; `flow_params.csv` keeps 6 of 18. When a flow moves to this runtime its rows
+move with it — they are not mirrored ahead of time. And `tools.csv` was renamed
+`agent_tools.csv`, because one name for two meanings is how the wrong file gets copied.
+
+## 11. Three flows other than design-robot did not pass preflight
+
+Found by the preflight while those flows were still in the runtime's copy. They are **findings
+about the OLD table**, kept here because they are real and belong to Yakov. The rows themselves
+have since left this tree (section 10), so the gate no longer reports them:
 
 * `reception` — the actor `Reception` matches **two** agent rows (ids 116 and 117, identical text).
   A duplicate row in `agents.csv`.

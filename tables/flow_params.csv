@@ -1,19 +1,7 @@
 flow_name,param,description
-F0-classify,${yakov_message},"the incoming Yakov message(s), already merged within the context window"
-F2-single,${issue},the Linear issue carrying the instruction kit
-F2-single,${agent},"the owner agent, bound at dispatch from the Owner field of the issue"
-F2-single,${validator},the validating actor for this row: Human / LLM / Interface / Deterministic
 design-robot,${mission_request},the incoming design request from Yakov
 design-robot,${capability_list},the robot capability list (Yakov #2113)
 design-robot,${product_path},"the folder this run's durable outputs land in - chosen by the Interface at core step 1, per run (Yakov #2828). design-robot lands under the project folder. The flow must not know the product (ruling 18)"
-F2-single,${destination},"which of the three homes this task's output goes to - product / run / linear - declared in the instruction kit, because F2-single is a template and the home differs per task"
-scheduled-watch,${watcher},"the scheduled task that runs this check, bound per row of _meta/scheduled_tasks.csv"
-scheduled-watch,${schedule},the schedule row that fired this run - what it watches and when it is due
-F0-classify,${placement},"the team and the project this run's issues land in. THE RULE (Yakov #5119): a birth value comes from the source of creation - the template or the flow row that opens the issue - and what the source of creation does not define, the Interface decides. This parameter is that decision. Not a column of the flow table (Yakov #5076)"
-reception,${inbound_mail},the message the mail_fetch service pulled into the spool. The flow does not fetch; it begins at triage
-reception,${placement},"burned per flow, not decided: the Reception project of the run's tenant. A flow with no Interface has no placement decision to make"
 design-robot,${placement},burned per flow: the Robot Design project of the run's tenant. Its phase milestones are minted into that project at step 1
-code-request,${request},"the incoming request to change or write code - from Yakov through the Interface, or raised by an agent that needs code it does not own"
-code-request,${placement},"burned per flow: the tenant core project - Golem core for the golem tenant, Modulize core for modulize"
 any,${agent},"the agent named in ^Dependency details^ - the one being asked. Bound at dispatch from the field, never chosen by the engine"
 any,${issue},the issue the question was asked on - the answer is a comment on it and the tag comes off it
