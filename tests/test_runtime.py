@@ -463,3 +463,48 @@ def test_a_second_opinion_avoids_the_engine_that_just_answered(tmp_path):
     wrapper._perform = watching
     wrapper.call(run_id="r", step="1", actor="Analyst", purpose="second", prompt="x", prefer_alternate=True)
     assert calls[0] != served
+
+
+# ------------------------------------------------------------------ the path boundary
+
+
+def test_a_relative_path_override_is_refused_not_resolved(monkeypatch, tmp_path):
+    """A relative override once made the runtime write into /srv/golem.
+
+    `Path.resolve()` resolves against the CURRENT WORKING DIRECTORY, so the same variable
+    meant a different tree depending on where the process was standing. The GOL-291 session
+    found the result: an empty `artifacts/toolproof` inside /srv/golem, owned by
+    interface-lead. Refusing is the only answer -- there is nothing safe to guess.
+    """
+    import importlib
+
+    monkeypatch.chdir(tmp_path)
+    for variable in ("GOLEM_RUNTIME_ROOT", "GOLEM_RUNTIME_TABLES", "GOLEM_RUNTIME_VAR",
+                     "GOLEM_RUNTIME_ARTIFACTS", "GOLEM_RUNTIME_SECRETS", "GOLEM_SECRET_SOCKET"):
+        monkeypatch.setenv(variable, "artifacts/somewhere")
+        with pytest.raises(Exception) as raised:
+            importlib.reload(importlib.import_module("golem_runtime.paths"))
+        assert "is relative" in str(raised.value)
+        monkeypatch.delenv(variable)
+    importlib.reload(importlib.import_module("golem_runtime.paths"))
+
+
+def test_an_absolute_override_is_honoured(monkeypatch, tmp_path):
+    import importlib
+
+    monkeypatch.setenv("GOLEM_RUNTIME_ROOT", str(tmp_path))
+    paths = importlib.reload(importlib.import_module("golem_runtime.paths"))
+    assert paths.RUNTIME_ROOT == tmp_path
+    assert paths.TABLES_DIR == tmp_path / "tables"
+    monkeypatch.delenv("GOLEM_RUNTIME_ROOT")
+    importlib.reload(importlib.import_module("golem_runtime.paths"))
+
+
+def test_the_default_tree_is_absolute_and_is_not_golem():
+    from golem_runtime import paths
+
+    assert paths.RUNTIME_ROOT.is_absolute()
+    for path in (paths.RUNTIME_ROOT, paths.TABLES_DIR, paths.VAR_DIR,
+                 paths.ARTIFACTS_DIR, paths.SECRETS_DIR, paths.SECRET_SOCKET):
+        assert path.is_absolute()
+        assert "/srv/golem" not in str(path)
