@@ -125,6 +125,8 @@ class TelegramGate:
                 answer = self._read(update, request)
                 if answer is None:
                     continue
+                # The button's spinner clears in `_read`, before this edit, because the edit is
+                # a second round trip and the spinner is what Yakov actually watches.
                 self.telegram.edit(message_id, self._question(request) + f"\n\n<b>{_label(answer['decision'])}</b> — {answer['actor']}")
                 return answer
         raise GateTimeout(f"gate {token} unanswered after {self.timeout_minutes} minutes; the run stays paused")

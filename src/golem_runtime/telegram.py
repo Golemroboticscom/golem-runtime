@@ -100,7 +100,9 @@ class Telegram:
         self.call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:180]})
 
     def updates(self, wait_seconds: int) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"timeout": wait_seconds}
+        # Only the two kinds a gate can be answered with. Anything else is noise that would
+        # be fetched, ignored, and would still consume the offset.
+        params: dict[str, Any] = {"timeout": wait_seconds, "allowed_updates": ["callback_query", "message"]}
         if self._offset is not None:
             params["offset"] = self._offset
         answer = self.call("getUpdates", params, timeout=wait_seconds + 20)
