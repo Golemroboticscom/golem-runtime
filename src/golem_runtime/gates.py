@@ -115,7 +115,13 @@ class TelegramGate:
         message_id = message["message_id"]
         deadline = time.time() + self.timeout_minutes * 60
         while time.time() < deadline:
-            for update in self.telegram.updates(self.poll_seconds):
+            try:
+                updates = self.telegram.updates(self.poll_seconds)
+            except Exception:
+                # The gate waits. Nothing that happens to the network ends the run here.
+                time.sleep(5)
+                continue
+            for update in updates:
                 answer = self._read(update, request)
                 if answer is None:
                     continue

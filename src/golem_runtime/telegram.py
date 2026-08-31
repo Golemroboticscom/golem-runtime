@@ -58,7 +58,18 @@ class Telegram:
             with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            return json.loads(exc.read().decode("utf-8", "replace"))
+            try:
+                return json.loads(exc.read().decode("utf-8", "replace"))
+            except ValueError:
+                return {"ok": False, "description": f"HTTP {exc.code}"}
+        except Exception as exc:
+            # EVERY transport failure is an ANSWER, never an exception that escapes.
+            #
+            # Measured on 2026-08-31: a run sat at gate 22 for an hour of healthy 25-second
+            # long-polls, then one `getUpdates` read timed out -- and the TimeoutError came
+            # straight up through the gate and killed the run. A gate is supposed to wait a
+            # day for a human; a single network hiccup must not be what ends it.
+            return {"ok": False, "description": f"{type(exc).__name__}: {exc}"}
 
     def me(self) -> dict[str, Any]:
         return self.call("getMe", timeout=15)
@@ -72,10 +83,12 @@ class Telegram:
         }
         if buttons:
             params["reply_markup"] = {"inline_keyboard": buttons}
-        answer = self.call("sendMessage", params)
-        if not answer.get("ok"):
-            raise RuntimeError(f"telegram refused the send: {answer}")
-        return answer["result"]
+        for attempt in range(4):
+            answer = self.call("sendMessage", params)
+            if answer.get("ok"):
+                return answer["result"]
+            time.sleep(2 * (attempt + 1))
+        raise RuntimeError(f"telegram refused the send four times: {answer}")
 
     def edit(self, message_id: int, text: str) -> None:
         self.call(
