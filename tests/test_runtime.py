@@ -84,7 +84,11 @@ def test_the_engine_wrapper_cannot_be_asked_for_a_model():
 
 def test_the_route_comes_from_the_agents_table():
     routes = engine.route_for("Analyst")
-    assert [r.provider for r in routes][0] == "anthropic"
+    # The first hop is whatever the row says. It is NOT anthropic any more: the GOL-291
+    # session confirmed no Anthropic API key exists under any spelling, so a route that
+    # could never answer was taken out of the table rather than tolerated.
+    assert [r.provider for r in routes][0] == "openai"
+    assert "anthropic" not in [r.provider for r in routes]
     assert engine.parse_route("a/b>c/d") == [engine.Route("a", "b"), engine.Route("c", "d")]
     with pytest.raises(ValueError):
         engine.parse_route("noslash")
@@ -447,7 +451,8 @@ def test_a_second_opinion_avoids_the_engine_that_just_answered(tmp_path):
 
     wrapper = EngineWrapper(RecordSink("alt", tmp_path), transport="echo")
     wrapper.call(run_id="r", step="1", actor="Analyst", purpose="primary", prompt="x")
-    assert wrapper._last_served["Analyst"] == "anthropic"
+    served = wrapper._last_served["Analyst"]
+    assert served == "openai"
     calls = []
     original = wrapper._perform
 
@@ -457,4 +462,4 @@ def test_a_second_opinion_avoids_the_engine_that_just_answered(tmp_path):
 
     wrapper._perform = watching
     wrapper.call(run_id="r", step="1", actor="Analyst", purpose="second", prompt="x", prefer_alternate=True)
-    assert calls[0] != "anthropic"
+    assert calls[0] != served
