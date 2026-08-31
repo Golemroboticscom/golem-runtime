@@ -81,7 +81,30 @@ call. The prompt now carries an index of every completed step plus a 1,500-chara
 last three. Measured after the change: the largest prompt in a full live run is under 5,000
 characters.
 
-## 9. Three flows other than design-robot do not pass preflight
+## 9. Google Custom Search is gone, and the tool was deleted rather than left broken
+
+I told Yakov the 403 was a console setting he could fix with one button. **He said "check
+again, I think Google simply does not allow whole-web search any more." He was right and I
+was wrong; the advice is withdrawn.**
+
+Measured, three ways:
+
+* the CSE key answers **403 PERMISSION_DENIED — "this project does not have the access to
+  Custom Search JSON API"**;
+* the **same key answers 200 on the YouTube API**, so the key is valid and the project is
+  fine — what is missing is an entitlement, not an enablement;
+* our second Google key gets the identical 403, so it is not a wrong-project mix-up.
+
+Confirmed against Google's own documentation, fetched live: the Custom Search JSON API is
+**closed to new customers**, existing customers keep it only until **2027-01-01**, and
+since **2026-01-20** a new Programmable Search Engine **cannot search the entire web** at
+all -- it must name up to 50 domains. There is no button.
+
+`GoogleSearch` was therefore removed from the catalogue, from every grant, from the code
+and from the credential file. Web search still works two ways that do not depend on it:
+the provider's own `WebSearch`, and `ImageSearch` on DuckDuckGo, which needs no key.
+
+## 10. Three flows other than design-robot do not pass preflight
 
 Found by the preflight, reported by the `tables-preflight` gate, **not fixed** — they are table
 findings and belong to Yakov, not to this build:

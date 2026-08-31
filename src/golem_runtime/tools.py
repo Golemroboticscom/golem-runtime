@@ -320,12 +320,6 @@ BUILTIN: dict[str, ToolSpec] = {
          "required": ["path", "find", "replace"]},
         _edit,
     ),
-    "GoogleSearch": ToolSpec(
-        "GoogleSearch", "network",
-        "Targeted web search through our own Google Custom Search key. Use it when you want our search rather than the model's.",
-        {"type": "object", "properties": {"query": _STRING, "count": {"type": "integer"}}, "required": ["query"]},
-        _service("google_search"),
-    ),
     "ImageSearch": ToolSpec(
         "ImageSearch", "network",
         "Find images on the web and return their URLs and the pages they came from.",

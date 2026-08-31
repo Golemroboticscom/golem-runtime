@@ -173,19 +173,6 @@ PERFORMERS = {"openai": _call_openai, "google": _call_google, "xai": _call_xai}
 # key as of a model key. `service` is the op; the agent asks, the holder performs.
 
 
-def _svc_google_search(creds: dict[str, str], query: str, image: bool = False, count: int = 8) -> dict[str, Any]:
-    params = urllib.parse.urlencode({
-        "key": creds["api_key"], "cx": creds["cx"], "q": query, "num": min(int(count), 10),
-        **({"searchType": "image"} if image else {}),
-    })
-    data = _http_get(f"https://www.googleapis.com/customsearch/v1?{params}", timeout=60)
-    return {"query": query, "results": [
-        {"title": i.get("title"), "link": i.get("link"), "snippet": i.get("snippet"),
-         **({"image": i.get("link"), "context": (i.get("image") or {}).get("contextLink")} if image else {})}
-        for i in data.get("items", [])
-    ]}
-
-
 def _svc_youtube_search(creds: dict[str, str], query: str, count: int = 6) -> dict[str, Any]:
     params = urllib.parse.urlencode({"key": creds["api_key"], "q": query, "part": "snippet",
                                      "type": "video", "maxResults": min(int(count), 25)})
@@ -220,10 +207,12 @@ def _svc_ocr(creds: dict[str, str], document_url: str) -> dict[str, Any]:
 def _svc_image_search(creds: dict[str, str], query: str, count: int = 8) -> dict[str, Any]:
     """Image search with no key at all.
 
-    Measured 2026-08-31: our Google Custom Search key answers HTTP 403 -- the Cloud project
-    does not have the Custom Search JSON API enabled, which is a console setting and not
-    something the runtime can fix. DuckDuckGo needs no key and is what the old system
-    already uses for images, so image search works today rather than after a console visit.
+    Measured 2026-08-31, and it is not a setting we can change: Google CLOSED the Custom
+    Search JSON API to new customers, and both of our keys answer HTTP 403 PERMISSION_DENIED
+    -- "this project does not have the access" -- while the very same key answers 200 on
+    YouTube, so the key is fine and the entitlement is gone. Google also stopped letting new
+    search engines search the entire web from 2026-01-20. There is nothing to enable.
+    DuckDuckGo needs no key and is what the old system already uses for images.
     """
     headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) golem-runtime/0.1"}
     landing = urllib.request.Request(
@@ -254,7 +243,6 @@ def _svc_image_search(creds: dict[str, str], query: str, count: int = 8) -> dict
 
 SERVICES = {
     "image_search": (None, _svc_image_search),
-    "google_search": ("google_cse", _svc_google_search),
     "youtube_search": ("google_api", _svc_youtube_search),
     "translate": ("google_api", _svc_translate),
     "ocr": ("mistral", _svc_ocr),
