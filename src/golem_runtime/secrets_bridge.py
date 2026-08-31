@@ -17,10 +17,12 @@ import base64
 import json
 import mimetypes
 import os
+import re
 import socket
 import socketserver
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,11 @@ def load_providers() -> dict[str, dict[str, str]]:
         return {}
     with PROVIDERS_FILE.open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _http_get(url: str, timeout: float) -> dict[str, Any]:
+    with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def _http_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeout: float) -> dict[str, Any]:
@@ -130,7 +137,147 @@ def _call_google(creds: dict[str, str], model: str, prompt: Any, system: str | N
     }
 
 
-PERFORMERS = {"openai": _call_openai, "google": _call_google}
+def _call_xai(creds: dict[str, str], model: str, prompt: Any, system: str | None, timeout: float,
+              tools: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:
+    """Grok, on the OpenAI-shaped chat-completions endpoint.
+
+    It matters that this is a THIRD provider and not a second model of the same one: a
+    second opinion from the same house is not a second opinion.
+    """
+    if tools or image or isinstance(prompt, list):
+        raise LookupError("the xai path in phase A carries plain text only: no tools, no images, no multi-turn")
+    messages = ([{"role": "system", "content": system}] if system else []) + [{"role": "user", "content": prompt}]
+    data = _http_json(
+        "https://api.x.ai/v1/chat/completions",
+        {"model": model, "messages": messages},
+        {"Authorization": f"Bearer {creds['api_key']}"},
+        timeout,
+    )
+    choice = (data.get("choices") or [{}])[0]
+    usage = data.get("usage") or {}
+    return {
+        "text": (choice.get("message") or {}).get("content", ""),
+        "usage": {"input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens")},
+        "provider_response_id": data.get("id"),
+        "output": [],
+    }
+
+
+PERFORMERS = {"openai": _call_openai, "google": _call_google, "xai": _call_xai}
+
+
+# --------------------------------------------------------------- non-model services
+#
+# A key-holding service that is NOT a model still belongs behind this bridge: the point
+# of ruling 15 is that the container holds no credential, and that is as true of a search
+# key as of a model key. `service` is the op; the agent asks, the holder performs.
+
+
+def _svc_google_search(creds: dict[str, str], query: str, image: bool = False, count: int = 8) -> dict[str, Any]:
+    params = urllib.parse.urlencode({
+        "key": creds["api_key"], "cx": creds["cx"], "q": query, "num": min(int(count), 10),
+        **({"searchType": "image"} if image else {}),
+    })
+    data = _http_get(f"https://www.googleapis.com/customsearch/v1?{params}", timeout=60)
+    return {"query": query, "results": [
+        {"title": i.get("title"), "link": i.get("link"), "snippet": i.get("snippet"),
+         **({"image": i.get("link"), "context": (i.get("image") or {}).get("contextLink")} if image else {})}
+        for i in data.get("items", [])
+    ]}
+
+
+def _svc_youtube_search(creds: dict[str, str], query: str, count: int = 6) -> dict[str, Any]:
+    params = urllib.parse.urlencode({"key": creds["api_key"], "q": query, "part": "snippet",
+                                     "type": "video", "maxResults": min(int(count), 25)})
+    data = _http_get(f"https://www.googleapis.com/youtube/v3/search?{params}", timeout=60)
+    return {"query": query, "results": [
+        {"title": i["snippet"]["title"], "channel": i["snippet"]["channelTitle"],
+         "published": i["snippet"]["publishedAt"],
+         "url": f"https://www.youtube.com/watch?v={i['id']['videoId']}"}
+        for i in data.get("items", []) if i.get("id", {}).get("videoId")
+    ]}
+
+
+def _svc_translate(creds: dict[str, str], text: str, target: str = "en") -> dict[str, Any]:
+    data = _http_json(f"https://translation.googleapis.com/language/translate/v2?key={creds['api_key']}",
+                      {"q": text, "target": target, "format": "text"}, {}, 60)
+    translations = (data.get("data") or {}).get("translations") or [{}]
+    return {"target": target, "translated": translations[0].get("translatedText", ""),
+            "detected_source": translations[0].get("detectedSourceLanguage")}
+
+
+def _svc_ocr(creds: dict[str, str], document_url: str) -> dict[str, Any]:
+    """Mistral OCR: 170 languages including Hebrew, and it reads a scan, not just a PDF layer."""
+    data = _http_json("https://api.mistral.ai/v1/ocr",
+                      {"model": "mistral-ocr-latest",
+                       "document": {"type": "document_url", "document_url": document_url}},
+                      {"Authorization": f"Bearer {creds['api_key']}"}, 300)
+    pages = data.get("pages") or []
+    return {"document": document_url, "page_count": len(pages),
+            "text": "\n\n".join(p.get("markdown", "") for p in pages)[:40000]}
+
+
+def _svc_image_search(creds: dict[str, str], query: str, count: int = 8) -> dict[str, Any]:
+    """Image search with no key at all.
+
+    Measured 2026-08-31: our Google Custom Search key answers HTTP 403 -- the Cloud project
+    does not have the Custom Search JSON API enabled, which is a console setting and not
+    something the runtime can fix. DuckDuckGo needs no key and is what the old system
+    already uses for images, so image search works today rather than after a console visit.
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) golem-runtime/0.1"}
+    landing = urllib.request.Request(
+        "https://duckduckgo.com/?" + urllib.parse.urlencode({"q": query, "iax": "images", "ia": "images"}),
+        headers=headers)
+    with urllib.request.urlopen(landing, timeout=60) as response:
+        html = response.read().decode("utf-8", "replace")
+    token = ""
+    for pattern in (r'vqd="([\d-]+)"', r"vqd='([\d-]+)'", r"vqd=([\d-]+)&"):
+        found = re.search(pattern, html)
+        if found:
+            token = found.group(1)
+            break
+    if not token:
+        raise LookupError("no vqd token in the response - the image search front end changed")
+    api = urllib.request.Request(
+        "https://duckduckgo.com/i.js?" + urllib.parse.urlencode(
+            {"l": "us-en", "o": "json", "q": query, "vqd": token, "f": ",,,", "p": "1"}),
+        headers={**headers, "Referer": "https://duckduckgo.com/"})
+    with urllib.request.urlopen(api, timeout=60) as response:
+        data = json.loads(response.read().decode("utf-8", "replace"))
+    return {"query": query, "results": [
+        {"title": r.get("title"), "image": r.get("image"), "context": r.get("url"),
+         "width": r.get("width"), "height": r.get("height")}
+        for r in (data.get("results") or [])[: int(count)]
+    ]}
+
+
+SERVICES = {
+    "image_search": (None, _svc_image_search),
+    "google_search": ("google_cse", _svc_google_search),
+    "youtube_search": ("google_api", _svc_youtube_search),
+    "translate": ("google_api", _svc_translate),
+    "ocr": ("mistral", _svc_ocr),
+}
+
+
+def served_services() -> list[str]:
+    """A service with no provider needs no credential, and is always served."""
+    held = load_providers()
+    return sorted(name for name, (provider, _) in SERVICES.items()
+                  if provider is None or (held.get(provider) or {}).get("api_key"))
+
+
+def perform_service(service: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    if service not in SERVICES:
+        raise LookupError(f"the bridge serves no service named {service!r}")
+    provider, handler = SERVICES[service]
+    if provider is None:
+        return handler({}, **arguments)
+    creds = load_providers().get(provider)
+    if not creds or not creds.get("api_key"):
+        raise LookupError(f"the bridge holds no credential for {provider!r}, which {service} needs")
+    return handler(creds, **arguments)
 
 
 def served_providers() -> list[str]:
@@ -170,9 +317,16 @@ class _Handler(socketserver.StreamRequestHandler):
     def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         op = request.get("op")
         if op == "ping":
-            return {"ok": True, "version": PROTOCOL_VERSION, "providers": served_providers()}
+            return {"ok": True, "version": PROTOCOL_VERSION, "providers": served_providers(), "services": served_services()}
         if op == "providers":
-            return {"ok": True, "providers": served_providers()}
+            return {"ok": True, "providers": served_providers(), "services": served_services()}
+        if op == "service":
+            try:
+                return {"ok": True, **perform_service(request["service"], request.get("arguments") or {})}
+            except urllib.error.HTTPError as exc:
+                return {"ok": False, "error": f"HTTP {exc.code}: {exc.read().decode('utf-8','replace')[:300]}"}
+            except Exception as exc:
+                return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         if op != "complete":
             return {"ok": False, "error": f"unknown op {op!r}"}
         try:
@@ -237,6 +391,9 @@ class BridgeClient:
 
     def providers(self, timeout: float = 10.0) -> list[str]:
         return list(self._request({"op": "providers"}, timeout).get("providers", []))
+
+    def service(self, service: str, arguments: dict[str, Any], timeout: float = 300.0) -> dict[str, Any]:
+        return self._request({"op": "service", "service": service, "arguments": arguments}, timeout + 30)
 
     def complete(self, provider: str, model: str, prompt: Any, system: str | None, timeout: float,
                  tools: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:

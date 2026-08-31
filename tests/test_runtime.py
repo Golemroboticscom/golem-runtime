@@ -401,4 +401,50 @@ def test_the_second_engine_asks_for_a_different_answer_without_naming_one():
     assert "prefer_alternate" in _inspect.signature(EngineWrapper.call).parameters
     assert engine.call_signature_forbids_model()
     routes = engine.route_for("Analyst")
-    assert len(routes) == 2  # so rotating gives a genuinely different route
+    assert len(routes) >= 2  # there has to BE an alternative for one to be preferred
+    assert len({r.provider for r in routes}) >= 2  # ...and it has to be a different house
+
+
+def test_the_catalogue_and_the_implementations_agree():
+    from golem_runtime import tools
+
+    report = tools.coverage()
+    assert report["asked_but_not_declared"] == []
+    assert report["implemented_but_not_declared"] == []
+    # Declared-but-unbuilt is allowed and REPORTED: it is the to-do list, not a lie.
+    assert set(report["declared_but_not_implemented"]) <= {"NotebookEdit", "Skill", "Task", "TodoWrite"}
+
+
+def test_bash_is_granted_only_where_a_step_has_to_run_something():
+    from golem_runtime import tools
+
+    for actor in ("Engineering Lead", "Simulation", "Rendering"):
+        assert "Bash" in [s.name for s in tools.granted(actor)]
+    for actor in ("Data gathering", "Validator", "Integration", "Interface"):
+        assert "Bash" not in [s.name for s in tools.granted(actor)]
+
+
+def test_bash_refuses_an_actor_with_no_writable_working_directory(tmp_path):
+    from golem_runtime import tools
+
+    ctx = tools.ToolContext("r", "1", "Validator", {"${product_path}": str(tmp_path)})
+    assert "no tool named 'Bash'" in tools.run_tool("Bash", {"command": "ls"}, ctx)["error"]
+
+
+def test_a_second_opinion_avoids_the_engine_that_just_answered(tmp_path):
+    """Rotating the row's order was not enough; the wrapper remembers who actually served."""
+    from golem_runtime.engine import EngineWrapper
+
+    wrapper = EngineWrapper(RecordSink("alt", tmp_path), transport="echo")
+    wrapper.call(run_id="r", step="1", actor="Analyst", purpose="primary", prompt="x")
+    assert wrapper._last_served["Analyst"] == "anthropic"
+    calls = []
+    original = wrapper._perform
+
+    def watching(route, *rest):
+        calls.append(route.provider)
+        return original(route, *rest)
+
+    wrapper._perform = watching
+    wrapper.call(run_id="r", step="1", actor="Analyst", purpose="second", prompt="x", prefer_alternate=True)
+    assert calls[0] != "anthropic"

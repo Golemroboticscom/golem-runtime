@@ -82,6 +82,10 @@ class EngineWrapper:
         self.transport = transport
         self.client = BridgeClient(socket_path) if transport == "bridge" else None
         self.timeout = float(timeout if timeout is not None else tables.control_int("engine_timeout_seconds", "runtime"))
+        # Which provider last actually SERVED each actor. Rotating the row's order was not
+        # enough: the row's first route is unserved in phase A, so a rotation handed back the
+        # very same provider and a "second opinion" was the same engine twice.
+        self._last_served: dict[str, str] = {}
 
     # NOTE: no `provider`, no `model`, no `engine` parameter. That absence is the iron rule.
     #
@@ -104,8 +108,10 @@ class EngineWrapper:
         routes = route_for(actor)
         if not routes:
             raise EngineUnavailable(f"{actor} has no engine route in agents.csv")
-        if prefer_alternate and len(routes) > 1:
-            routes = routes[1:] + routes[:1]
+        if prefer_alternate:
+            served = self._last_served.get(actor)
+            if served:
+                routes = [r for r in routes if r.provider != served] + [r for r in routes if r.provider == served]
         attempts: list[dict[str, Any]] = []
         for index, route in enumerate(routes):
             started = time.time()
@@ -144,6 +150,8 @@ class EngineWrapper:
                 record["provider_response_id"] = result.get("provider_response_id")
             self.sink.emit("engine_call", **record)
             if result is not None:
+                if not prefer_alternate:
+                    self._last_served[actor] = route.provider
                 return {
                     "text": result.get("text", ""),
                     "provider": route.provider,

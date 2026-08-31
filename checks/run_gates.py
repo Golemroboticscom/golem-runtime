@@ -139,15 +139,35 @@ def check_one_source():
 
 @gate("record-from-day-one")
 def check_record():
-    """Ruling 6: every engine call emits a structured record, even while nothing displays it."""
-    from golem_runtime.engine import EngineWrapper
+    """Ruling 6: every engine call emits a structured record, even while nothing displays it.
 
-    source = inspect.getsource(EngineWrapper.call)
-    if 'self.sink.emit("engine_call"' not in source:
-        return False, "EngineWrapper.call does not emit an engine_call record"
-    if source.index('self.sink.emit("engine_call"') > source.index("if result is not None:\n                return"):
-        return False, "the record is emitted only on success"
-    return True, "every attempt, successful or not, emits an engine_call record"
+    Checked by BEHAVIOUR, not by reading the source. An earlier version of this gate matched
+    a literal line of `EngineWrapper.call` and broke the moment that line moved -- a check
+    that fails when the code is merely rearranged is noise, and one that passes because the
+    string happens to be present is worse.
+    """
+    import tempfile
+
+    from golem_runtime.engine import EngineUnavailable, EngineWrapper
+    from golem_runtime.records import RecordSink
+
+    with tempfile.TemporaryDirectory() as tmp:
+        sink = RecordSink("gate-check", Path(tmp))
+        # A bridge transport pointed at a socket that does not exist: every route must FAIL.
+        wrapper = EngineWrapper(sink, transport="bridge", socket_path=Path(tmp) / "absent.sock")
+        try:
+            wrapper.call(run_id="gate-check", step="1", actor="Analyst", purpose="gate", prompt="x")
+            return False, "a call with no bridge somehow succeeded"
+        except EngineUnavailable:
+            pass
+        records = sink.of_event("engine_call")
+    if not records:
+        return False, "a failed engine call emitted no record at all"
+    if any(record["ok"] for record in records):
+        return False, "a failed call recorded itself as ok"
+    if not all({"prompt_sha256", "route", "elapsed_ms", "error"} <= set(record) for record in records):
+        return False, "an engine_call record is missing its fields"
+    return True, f"a call that failed every route still emitted {len(records)} engine_call records"
 
 
 @gate("tests")

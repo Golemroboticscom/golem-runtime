@@ -13,3 +13,8 @@ Skill,capability,Loads a declared skill,which skills are loadable is the catalog
 TodoWrite,bookkeeping,Keeps the run's own task list,no effect outside the run
 Vision,read,Looks at an image - a URL or a file the agent may read - and answers a question about it,the image never enters the graph state; the bridge is the only process that reads the file and it already holds every credential
 Consult,delegation,Asks a SECOND engine for an independent opinion on one question,"the asker does not choose the engine - it asks for an answer that is not the primary route's, and the routing layer decides which that is. This is the cross-agency second-engine-crosscheck skill, as a tool"
+GoogleSearch,network,Targeted web search through our OWN Google Custom Search key,"distinct from WebSearch, which is the model provider's own facility. This one is ours: our key, our quota (100 free queries a day), and the same result whichever engine is asking"
+ImageSearch,network,Finds images on the web and returns their URLs and the pages they came from,the same Custom Search key with searchType=image. Step 7 of design-robot - collect competitor images - is what needs it
+YouTube,network,"Searches YouTube for videos - product demonstrations, teardowns, field footage","YouTube Data v3 on the shared google_api_key, ~10k units a day free"
+Translate,network,Translates text into a target language,for a source that is not in English. Google Translate v2 on the shared google_api_key
+OCR,network,Reads a scanned document or PDF at a URL and returns its text,"Mistral OCR: 170 languages including Hebrew, and it reads a scan rather than only a PDF text layer"
