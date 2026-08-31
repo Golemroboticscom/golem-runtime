@@ -21,6 +21,7 @@ import re
 import socket
 import socketserver
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -361,7 +362,25 @@ class BridgeClient:
     def __init__(self, socket_path: Path | None = None):
         self.socket_path = Path(socket_path or SECRET_SOCKET)
 
-    def _request(self, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+    def _request(self, payload: dict[str, Any], timeout: float, attempts: int = 4) -> dict[str, Any]:
+        """Retry the CONNECT, never the call.
+
+        A bridge that is restarting refuses connections for a second or two. On 2026-08-31
+        that was enough to end a 48-step run at step 29 with every route reporting
+        "connection refused" -- the run died of a gap, not of a failure. Reconnecting is
+        safe to retry because nothing has been sent yet; the request itself is not retried,
+        because the far side may already have performed it.
+        """
+        last: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return self._attempt(payload, timeout)
+            except (ConnectionRefusedError, FileNotFoundError) as exc:
+                last = exc
+                time.sleep(2 * (attempt + 1))
+        raise last if last else RuntimeError("the bridge could not be reached")
+
+    def _attempt(self, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
             sock.connect(str(self.socket_path))
