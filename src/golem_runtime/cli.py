@@ -53,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
     show.add_argument("run_id")
     show.add_argument("--event")
 
+    ex = sub.add_parser("export", help="write a finished run's outputs as readable files")
+    ex.add_argument("run_id")
+    ex.add_argument("--to", type=Path, required=True)
+
     sub.add_parser("runs", help="list finished runs")
     sub.add_parser("bridge-status", help="ask the secret bridge which providers it serves")
 
@@ -86,6 +90,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.event and entry["event"] != args.event:
                 continue
             print(json.dumps(entry, ensure_ascii=False, sort_keys=True))
+    elif args.command == "export":
+        from .export import export
+
+        print(json.dumps(export(args.run_id, args.to), indent=2, sort_keys=True))
     elif args.command == "runs":
         for path in sorted(Path(RUN_DIR).glob("*.json")):
             data = json.loads(path.read_text(encoding="utf-8"))
