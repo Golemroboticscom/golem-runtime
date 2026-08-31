@@ -21,7 +21,23 @@ the Interface bridge.
 group — in the same chat `-1004323045500`. Same channel, no shared code, no shared poller. The token
 is a value in `secrets/telegram.json`; swapping it is a one-line change.
 
-## 2. Anthropic is not served in phase A; the cascade is real
+## 2. Anthropic was the first hop everywhere, and the key does not exist
+
+**Settled by the GOL-291 session (#6552), which is the answer I asked for rather than a
+delay: there is no `anthropic_key` under any spelling.** Not `anthropic_key`, not
+`claude_api_key`, not `anthropic_api_key`; no agent in the fleet holds one and none is
+registered in the ACL. The Claude family is reachable by exactly one route in this
+company -- the Max-plan CLI, one concurrent session, one credential that cloning
+invalidates, which is why `claude_slot.py` exists.
+
+**So the table changed rather than the search continuing.** `anthropic/claude-opus-5` is
+out of the cascade on all thirteen rows; every agent now routes `openai/gpt-5.6-luna >
+xai/grok-4.5`. That removes 31 guaranteed-failing calls from every design-robot run.
+
+Buying an Anthropic API key is a purchase decision and sits with Yakov. Reaching the Max
+subscription instead is a build, and it has a shape (see section 12).
+
+## 2b. What the cascade proved while it was there
 
 `agents.csv` routes every agent `anthropic/claude-opus-5>openai/gpt-5.6`. The secret bridge holds an
 OpenAI key and a Google key; there is no Anthropic API key on the host — the Claude family is reached
@@ -122,10 +138,16 @@ six flows are work this runtime will do; the table is the plan, not a mirror, an
 there because they are next -- not because they were copied. `flow_params.csv` went back with
 it, since parameters without their flow are not a definition of anything.
 
-**The distinction that survives, and it is the reason `control_values.csv` stays trimmed:** the
-sixty control rows describe mechanisms this runtime does not have and may never have -- a
-dispatcher queue, the old bridge's message splitting, a stagnation detector. They are another
-system's numbers. The five other flows are *this* system's future work. A plan is not a copy.
+**And the same reversal reached `control_values.csv` (#6549): "all of them stay the same
+except the agents table and the adjustments the agents need."** The sixty rows are back. I
+had argued they describe mechanisms this runtime may never have -- a dispatcher queue, a
+message splitter, a stagnation detector -- and that reasoning was mine, not a measurement.
+The tables are the plan for what gets built; deciding which parts of the plan are dead is
+Yakov's call and not a tidying job.
+
+**`agents.csv` is the ONE table that legitimately differs**, because the agents genuinely
+changed shape: an agent is now a row with an engine, a tool grant, a mount list, a network
+field, a secrets field and an image -- not an operating-system user.
 
 **`tools.csv` was renamed `agent_tools.csv`** and that stands: one name for two meanings is how
 the wrong file gets copied.
