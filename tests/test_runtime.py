@@ -297,6 +297,8 @@ def test_network_and_secrets_are_fields_on_the_row_not_facts_in_the_code():
     assert "--network" in argv and argv[argv.index("--network") + 1] == "host"
     assert any(a.endswith("secrets.sock:rw") for a in argv)
     assert not any("providers.json" in a for a in argv)  # the key never travels
+    mounted = [a for a in argv if a.startswith("/srv/runtime/tables:")]
+    assert mounted == ["/srv/runtime/tables:/srv/runtime/tables:ro"]  # same path, nothing else
 
 
 def test_the_human_owner_gets_no_container_boundary():

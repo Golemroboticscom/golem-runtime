@@ -51,7 +51,9 @@ class Mount:
 
     @property
     def target(self) -> str:
-        return f"/work{self.source}"
+        """Mounted at the same path it has on the host: the agent sees the same names as the
+        tables do, it simply sees nothing else."""
+        return str(self.source)
 
     def to_arg(self) -> str:
         return f"{self.source}:{self.target}:{self.mode}"
@@ -119,7 +121,9 @@ def podman_argv(actor: str, command: list[str], params: dict[str, str] | None = 
         argv += ["-e", "GOLEM_SECRET_SOCKET=/opt/runtime/secrets.sock"]
     elif access["secrets"] not in {"", "none"}:
         raise ValueError(f"{access['agent']}: unsupported secrets mode {access['secrets']!r} in phase A")
-    argv += ["-e", "PYTHONPATH=/opt/runtime/lib:/opt/runtime/src", "-w", "/work"]
+    argv += ["-e", "PYTHONPATH=/opt/runtime/lib:/opt/runtime/src"]
+    argv += ["-e", f"GOLEM_RUNTIME_TABLES={RUNTIME_ROOT / 'tables'}", "-e", "GOLEM_RUNTIME_VAR=/tmp/run"]
+    argv += ["-w", "/tmp"]
     argv += [image, *command]
     return argv
 
