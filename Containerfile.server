@@ -1,0 +1,19 @@
+# The LangGraph agent server, in a container.
+#
+# Ruling 14 puts LangGraph Studio in phase A, and Studio attaches to a graph served locally
+# by the agent server. Measured on 2026-08-31: the server package `langgraph-api` publishes
+# no wheel for Python 3.10, which is the host's only interpreter and needs root to change.
+# The container is the answer that needs no root -- and it is the shape ruling 10 asks for
+# anyway, so nothing is bent to get it.
+FROM docker.io/library/python:3.11-slim
+
+RUN pip install --no-cache-dir "langgraph-cli[inmem]==0.4.31" "langgraph==1.2.11" \
+    "langgraph-checkpoint-sqlite==3.1.1"
+
+ENV PYTHONPATH=/opt/runtime/src \
+    GOLEM_RUNTIME_ROOT=/opt/runtime \
+    GOLEM_RUNTIME_TRANSPORT=echo \
+    PYTHONUNBUFFERED=1
+WORKDIR /opt/runtime
+EXPOSE 2024
+CMD ["langgraph", "dev", "--host", "0.0.0.0", "--port", "2024", "--no-browser", "--allow-blocking"]

@@ -1,0 +1,24 @@
+# Credentials never enter the repository. The bridge holds them on the host (ruling 15).
+secrets/
+
+# Run state, records, checkpoints, container storage: the machine's, not the repository's.
+var/
+
+# Heavy files live on the host with a backup; git keeps the pointer (ruling 8).
+artifacts/
+
+# Third-party packages are installed with `pip install --target lib`, not committed.
+lib/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# HOME for the container tooling is /srv/runtime, so podman and the agent server drop state here.
+.cache/
+.local/
+.langgraph_api/
+.config/
+
+# The deploy key. It lives on the host and nowhere else.
+.ssh/

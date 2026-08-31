@@ -1,0 +1,26 @@
+# The gates, on every push (ruling 16).
+#
+# During the BUILD there is no branch protection and no approval: pushes go straight to main
+# with the deploy key. The gates still run and still report. They are armed -- `--blocking`
+# -- at the END OF THE BUILD, not at the end of phase A.
+name: gates
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install the runtime's dependencies
+        run: pip install --target lib langgraph==1.2.11 langgraph-checkpoint-sqlite==3.1.1 pytest
+      - name: run the gates (report-only during the build)
+        env:
+          PYTHONPATH: ${{ github.workspace }}/lib:${{ github.workspace }}/src
+          GOLEM_RUNTIME_ROOT: ${{ github.workspace }}
+        run: python3 checks/run_gates.py

@@ -1,0 +1,13 @@
+tool,kind,what it does,note
+Bash,execution,Runs a shell command as the agent's own OS user,"the widest tool there is: everything the OS user may do, it may do. Our own scripts - md2pdf, gibberish_check, run_fea - are reached THROUGH it and are not separate rows, because the permission that matters is Bash itself"
+Read,read,Reads a file,
+Glob,read,Finds files by name pattern,
+Grep,read,Searches file contents,
+Write,write,Creates or overwrites a file,
+Edit,write,Changes part of an existing file,
+NotebookEdit,write,Changes a cell in a Jupyter notebook,
+WebSearch,network,Searches the web,leaves the machine
+WebFetch,network,Fetches a URL,leaves the machine
+Task,delegation,Starts a sub-agent,"a tool that creates another runner - the only row here that multiplies a permission rather than using one"
+Skill,capability,Loads a declared skill,which skills are loadable is the catalogue's answer (rulings 143-145), not this table's
+TodoWrite,bookkeeping,Keeps the run's own task list,no effect outside the run

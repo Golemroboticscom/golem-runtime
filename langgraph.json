@@ -1,0 +1,13 @@
+{
+  "dependencies": [
+    "./src"
+  ],
+  "graphs": {
+    "design-robot": "golem_runtime.graph:graph"
+  },
+  "env": {
+    "GOLEM_RUNTIME_ROOT": "/opt/runtime",
+    "GOLEM_RUNTIME_FLOW": "design-robot",
+    "GOLEM_RUNTIME_TRANSPORT": "echo"
+  }
+}

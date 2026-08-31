@@ -1,0 +1,95 @@
+# Build log — phase A
+
+Decisions taken **during the build**, under the regime of ruling 16 (no approvals, gates still run).
+These are engineering choices and measurements, **not rulings**: a ruling is Yakov's wording and goes
+in `rulings.csv` only after he has seen the sentence. Anything here that should become a ruling is
+marked **→ needs Yakov's wording**.
+
+---
+
+## 1. The runtime speaks as a separate bot in the same chat → needs Yakov's wording
+
+Ruling 2 says the approval surface is Telegram, "this chat and the existing bot", and that the
+runtime holds its own token and chat id.
+
+**Measured:** the Interface bridge long-polls its bot token continuously. Telegram's `getUpdates`
+confirms an offset by deleting every update below it, so a second poller on the **same token** would
+consume Yakov's messages to the Interface before the bridge saw them. Sharing the token would break
+the Interface bridge.
+
+**Done:** the runtime posts and polls as `@Golem_Enforcer_Bot` — a live, idle bot already in the same
+group — in the same chat `-1004323045500`. Same channel, no shared code, no shared poller. The token
+is a value in `secrets/telegram.json`; swapping it is a one-line change.
+
+## 2. Anthropic is not served in phase A; the cascade is real
+
+`agents.csv` routes every agent `anthropic/claude-opus-5>openai/gpt-5.6`. The secret bridge holds an
+OpenAI key and a Google key; there is no Anthropic API key on the host — the Claude family is reached
+through the Max-plan CLI, which is `/srv/golem`-coupled and single-session, and importing it would
+break the separation ruling 3 requires.
+
+**Consequence:** every agent step fails its first route and succeeds on its second. That is not a
+defect being tolerated: it exercises the cascade on every single call, which is a thing phase A has
+to prove anyway. It is recorded, per attempt, in the run's record.
+
+## 3. `openai/gpt-5.6` was corrected to `openai/gpt-5.6-luna`
+
+**Measured against the provider's model list:** `gpt-5.6` is not an id. The published ids are
+`gpt-5.6-luna`, `gpt-5.6-sol` and `gpt-5.6-terra`; all three answer. The table now pins the first
+alphabetically. Thirteen rows changed. Nothing else about the routing moved.
+
+## 4. New columns on `agents.csv`: `network` and `secrets` → needs Yakov's wording
+
+Ruling 15 says the container's network access and the way it holds secrets are **fields on the
+agent's row, never fixed in code**. There were no such fields. There are now, filled with the phase A
+values the ruling states: `network=open`, `secrets=bridge` for every agent, empty for the human owner.
+
+The `mounts` column existed and was empty; it is now filled, and it is the whole of an agent's access
+(ruling 10). `${product_path}` inside a mount is substituted per run, so the boundary is per-run and
+not global. Measured asymmetry, as an example: the Engineering Lead may write the product path, the
+Validator may only read it, and Rendering cannot see the tables at all.
+
+## 5. New rows in `control_values.csv`, branch `runtime` → needs Yakov's wording
+
+`run_step_ceiling` (400), `gate_poll_seconds` (25), `gate_timeout_minutes` (1440),
+`engine_timeout_seconds` (600), `artifact_max_mb` (200), `commit_file_max_kb` (2048).
+
+`run_step_ceiling` is the one that matters. Every loop already had a `loop_ceiling`, which bounds ONE
+loop; nothing bounded the whole run. The 2026-08-31 runaway that wrote 90 GB of checkpoints had no
+ceiling of this kind. It is now the graph's recursion limit on every invoke and resume.
+
+## 6. Rootless containers run as `golem-runtime`, not as the Interface
+
+**Measured:** `/etc/subuid` grants `golem-runtime` 200000:65536 and grants `interface-lead` nothing,
+so rootless podman cannot run as the Interface. Containers are launched through
+`sudo -u golem-runtime`, a grant the Interface already holds. Podman also needs
+`--cgroup-manager=cgroupfs --events-backend=file` and, for builds, `--isolation=chroot`, because
+there is no systemd user session for uid 974.
+
+## 7. The agent server runs in a container
+
+**Measured:** `langgraph-api`, which the local agent server needs, publishes no wheel for Python
+3.10 — the host's only interpreter, and changing that needs root. `Containerfile.server` builds it on
+`python:3.11-slim` and mounts the runtime in. This is the shape ruling 10 asks for anyway, so nothing
+was bent to get it.
+
+## 8. The prompt carries a bounded slice of the run
+
+**Measured:** carrying the last six upstream outputs whole pushed step 11's prompt to 103,246
+characters and it was still growing — a 48-step flow would have reached six figures of tokens per
+call. The prompt now carries an index of every completed step plus a 1,500-character excerpt of the
+last three. Measured after the change: the largest prompt in a full live run is under 5,000
+characters.
+
+## 9. Three flows other than design-robot do not pass preflight
+
+Found by the preflight, reported by the `tables-preflight` gate, **not fixed** — they are table
+findings and belong to Yakov, not to this build:
+
+* `reception` — the actor `Reception` matches **two** agent rows (ids 116 and 117, identical text).
+  A duplicate row in `agents.csv`.
+* `F2-single` — steps `E2, E3, E4, E7, E8` are unreachable by any declared `next` or `loop_back_to`
+  edge. They look like error handlers reached by an edge the table does not model.
+* `code-request` — step `1n` is unreachable, same shape.
+
+`design-robot` validates cleanly: 48 rows, one terminal, every step reachable.
