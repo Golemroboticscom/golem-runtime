@@ -508,3 +508,32 @@ def test_the_default_tree_is_absolute_and_is_not_golem():
                  paths.ARTIFACTS_DIR, paths.SECRETS_DIR, paths.SECRET_SOCKET):
         assert path.is_absolute()
         assert "/srv/golem" not in str(path)
+
+
+def test_the_step_may_name_its_own_engine_and_the_agent_is_the_fallback():
+    """The simplest routing there is: one column on the flow row, more specific wins.
+
+    Nothing new was built for it -- `parse_route` already read `a/b>c/d` cascades and the
+    wrapper already walked them. This is one lookup ahead of the one that existed.
+    """
+    agent_route = [str(r) for r in engine.route_for("Analyst")]
+    assert agent_route and "openai" in agent_route[0]
+
+    assert [str(r) for r in engine.route_for("Analyst", "xai/grok-4.5")] == ["xai/grok-4.5"]
+    assert [str(r) for r in engine.route_for("Analyst", "google/gemini-2.5-flash>openai/gpt-5.6-luna")] == [
+        "google/gemini-2.5-flash", "openai/gpt-5.6-luna"
+    ]
+    # An empty cell is not a choice: it falls through to the agent's row.
+    assert [str(r) for r in engine.route_for("Analyst", "")] == agent_route
+    assert [str(r) for r in engine.route_for("Analyst", "   ")] == agent_route
+
+
+def test_the_flow_table_carries_the_column_and_it_is_empty_by_default():
+    rows = tables.flow(FLOW)
+    assert all("engine" in row for row in rows)
+    assert not any(row["engine"] for row in rows), "filling it is Yakov's decision, not the build's"
+
+
+def test_the_iron_rule_survives_the_per_step_engine():
+    """A step naming an engine is a TABLE speaking. The caller still may not."""
+    assert engine.call_signature_forbids_model()

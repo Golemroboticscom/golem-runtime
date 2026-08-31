@@ -286,6 +286,7 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 prompt=build_prompt(row, state),
                 params=state.get("params", {}),
                 system=system_prompt(row, state),
+                step_engine=row.get("engine", ""),
             )
             reported = re.search(r"confidence\s*[:=]\s*(\d{1,3})\s*%", answer["text"], re.I)
             threshold = row.get("agent_confidence_threshold", "").strip()
@@ -351,6 +352,7 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 actor=row["actor"],
                 purpose="routing-decision",
                 prompt=_routing_prompt(row, allowed),
+                step_engine=row.get("engine", ""),
             )
             chosen = answer["text"].strip().splitlines()[0].strip() if answer["text"].strip() else ""
             chosen = ref_to_step(chosen, row["flow_name"])

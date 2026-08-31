@@ -56,9 +56,21 @@ def parse_route(spec: str) -> list[Route]:
     return routes
 
 
-def route_for(actor: str) -> list[Route]:
-    """The routing decision, read from the table. The caller does not get a say."""
-    return parse_route(tables.resolve_actor(actor).get("engine", ""))
+def route_for(actor: str, step_engine: str = "") -> list[Route]:
+    """The routing decision, read from the tables. The caller does not get a say.
+
+    Two places may hold it, and the more specific wins:
+
+      1. the `engine` column of the STEP's row in flow.csv -- empty on every row by default
+      2. the `engine` column of the ACTOR's row in agents.csv
+
+    That is the whole of it. `parse_route` already understood `a/b>c/d` cascades and
+    `EngineWrapper.call` already walked them; this adds one lookup and no new machinery.
+    A step that names an engine still names it in a TABLE, which is the routing layer
+    speaking -- not the agent asking, which is what the iron rule forbids.
+    """
+    routes = parse_route(step_engine)
+    return routes if routes else parse_route(tables.resolve_actor(actor).get("engine", ""))
 
 
 def _as_text(prompt: Any) -> str:
@@ -104,8 +116,9 @@ class EngineWrapper:
         image: str | None = None,
         tool_declarations: list[dict[str, Any]] | None = None,
         prefer_alternate: bool = False,
+        step_engine: str = "",
     ) -> dict[str, Any]:
-        routes = route_for(actor)
+        routes = route_for(actor, step_engine)
         if not routes:
             raise EngineUnavailable(f"{actor} has no engine route in agents.csv")
         if prefer_alternate:
@@ -183,7 +196,8 @@ class EngineWrapper:
     # ------------------------------------------------------------------ the agent loop
 
     def work(self, *, run_id: str, step: str, actor: str, purpose: str, prompt: str,
-             params: dict[str, str] | None = None, system: str | None = None) -> dict[str, Any]:
+             params: dict[str, str] | None = None, system: str | None = None,
+             step_engine: str = "") -> dict[str, Any]:
         """One agent step that may actually WORK, not just answer once.
 
         A step with no tools on its row is a single call and this is exactly `call`.
@@ -195,7 +209,8 @@ class EngineWrapper:
 
         specs = toolbox.granted(actor)
         if not specs:
-            answer = self.call(run_id=run_id, step=step, actor=actor, purpose=purpose, prompt=prompt, system=system)
+            answer = self.call(run_id=run_id, step=step, actor=actor, purpose=purpose, prompt=prompt,
+                               system=system, step_engine=step_engine)
             return {**answer, "turns": 1, "tool_calls": []}
 
         declarations = [spec.declaration() for spec in specs]
@@ -209,6 +224,7 @@ class EngineWrapper:
             answer = self.call(
                 run_id=run_id, step=step, actor=actor, purpose=f"{purpose}:turn-{turn}",
                 prompt=conversation, system=system, tool_declarations=declarations,
+                step_engine=step_engine,
             )
             requests = [item for item in answer.get("output", []) if item.get("type") == "function_call"]
             conversation.extend(answer.get("output", []))
