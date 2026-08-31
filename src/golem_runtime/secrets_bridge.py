@@ -13,7 +13,9 @@ wrapper talks to, and it is the only thing that ships into the container.
 """
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import os
 import socket
 import socketserver
@@ -47,10 +49,37 @@ def _http_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeo
         return json.loads(response.read().decode("utf-8"))
 
 
-def _call_openai(creds: dict[str, str], model: str, prompt: str, system: str | None, timeout: float) -> dict[str, Any]:
-    payload: dict[str, Any] = {"model": model, "input": prompt}
+def _image_part(image: str) -> dict[str, Any]:
+    """A URL travels as a URL; a file on the host travels as inline data.
+
+    The bridge is the only process that touches the file, and it is already the
+    process that holds every credential -- so nothing new crosses the boundary.
+    """
+    if image.startswith(("http://", "https://")):
+        return {"type": "input_image", "image_url": image}
+    path = Path(image[len("file://") :] if image.startswith("file://") else image)
+    media = mimetypes.guess_type(path.name)[0] or "image/png"
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"type": "input_image", "image_url": f"data:{media};base64,{encoded}"}
+
+
+def _as_input(prompt: Any, image: str | None) -> Any:
+    """A string becomes one user turn; a list is already a conversation and travels whole."""
+    if isinstance(prompt, list):
+        return prompt
+    content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+    if image:
+        content.append(_image_part(image))
+    return [{"role": "user", "content": content}]
+
+
+def _call_openai(creds: dict[str, str], model: str, prompt: Any, system: str | None, timeout: float,
+                 tools: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"model": model, "input": _as_input(prompt, image)}
     if system:
         payload["instructions"] = system
+    if tools:
+        payload["tools"] = tools
     data = _http_json(
         "https://api.openai.com/v1/responses",
         payload,
@@ -67,10 +96,16 @@ def _call_openai(creds: dict[str, str], model: str, prompt: str, system: str | N
         "text": "".join(chunks),
         "usage": {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens")},
         "provider_response_id": data.get("id"),
+        "output": data.get("output", []),
     }
 
 
-def _call_google(creds: dict[str, str], model: str, prompt: str, system: str | None, timeout: float) -> dict[str, Any]:
+def _call_google(creds: dict[str, str], model: str, prompt: Any, system: str | None, timeout: float,
+                 tools: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:
+    if tools or image or isinstance(prompt, list):
+        # Honest refusal rather than a silent downgrade: the caller cascades to a route
+        # that can do the job, and the record says why this one could not.
+        raise LookupError("the google path in phase A carries plain text only: no tools, no images, no multi-turn")
     name = model if model.startswith("models/") else f"models/{model}"
     payload: dict[str, Any] = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
     if system:
@@ -91,6 +126,7 @@ def _call_google(creds: dict[str, str], model: str, prompt: str, system: str | N
         "text": "".join(chunks),
         "usage": {"input_tokens": usage.get("promptTokenCount"), "output_tokens": usage.get("candidatesTokenCount")},
         "provider_response_id": data.get("responseId"),
+        "output": [],
     }
 
 
@@ -102,13 +138,14 @@ def served_providers() -> list[str]:
     return sorted(p for p, creds in load_providers().items() if p in PERFORMERS and creds.get("api_key"))
 
 
-def perform(provider: str, model: str, prompt: str, system: str | None = None, timeout: float = 600.0) -> dict[str, Any]:
+def perform(provider: str, model: str, prompt: Any, system: str | None = None, timeout: float = 600.0,
+            tools: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:
     creds = load_providers().get(provider)
     if not creds or not creds.get("api_key"):
         raise LookupError(f"the bridge holds no credential for provider {provider!r}")
     if provider not in PERFORMERS:
         raise LookupError(f"the bridge cannot perform calls for provider {provider!r} in phase A")
-    return PERFORMERS[provider](creds, model, prompt, system, timeout)
+    return PERFORMERS[provider](creds, model, prompt, system, timeout, tools, image)
 
 
 # ------------------------------------------------------------------------------ server
@@ -145,6 +182,8 @@ class _Handler(socketserver.StreamRequestHandler):
                 request["prompt"],
                 request.get("system"),
                 float(request.get("timeout", 600)),
+                request.get("tools"),
+                request.get("image"),
             )
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:500]
@@ -199,9 +238,11 @@ class BridgeClient:
     def providers(self, timeout: float = 10.0) -> list[str]:
         return list(self._request({"op": "providers"}, timeout).get("providers", []))
 
-    def complete(self, provider: str, model: str, prompt: str, system: str | None, timeout: float) -> dict[str, Any]:
+    def complete(self, provider: str, model: str, prompt: Any, system: str | None, timeout: float,
+                 tools: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:
         return self._request(
-            {"op": "complete", "provider": provider, "model": model, "prompt": prompt, "system": system, "timeout": timeout},
+            {"op": "complete", "provider": provider, "model": model, "prompt": prompt, "system": system,
+             "timeout": timeout, "tools": tools, "image": image},
             timeout + 30,
         )
 

@@ -218,14 +218,24 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
             if kind == "script-step":
                 return _run_script(row, state, effect_key)
             purpose = "route" if kind == "outbound-send" else kind
-            answer = engine.call(
+            # `work`, not `call`: a step whose row grants tools may actually DO the work --
+            # search, fetch, read, write, look at an image, ask a second engine -- and only
+            # then answer. A row with no tools is one call, exactly as before.
+            answer = engine.work(
                 run_id=state["run_id"],
                 step=step,
                 actor=row["actor"],
                 purpose=purpose,
                 prompt=build_prompt(row, state),
+                params=state.get("params", {}),
             )
-            payload = {"text": answer["text"], "provider": answer["provider"], "model": answer["model"]}
+            payload = {
+                "text": answer["text"],
+                "provider": answer["provider"],
+                "model": answer["model"],
+                "turns": answer.get("turns", 1),
+                "tool_calls": answer.get("tool_calls", []),
+            }
             if kind == "outbound-send":
                 engine.sink.emit(
                     "outbound_send",

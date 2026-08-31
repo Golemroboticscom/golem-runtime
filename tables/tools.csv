@@ -11,3 +11,5 @@ WebFetch,network,Fetches a URL,leaves the machine
 Task,delegation,Starts a sub-agent,"a tool that creates another runner - the only row here that multiplies a permission rather than using one"
 Skill,capability,Loads a declared skill,which skills are loadable is the catalogue's answer (rulings 143-145), not this table's
 TodoWrite,bookkeeping,Keeps the run's own task list,no effect outside the run
+Vision,read,Looks at an image - a URL or a file the agent may read - and answers a question about it,the image never enters the graph state; the bridge is the only process that reads the file and it already holds every credential
+Consult,delegation,Asks a SECOND engine for an independent opinion on one question,"the asker does not choose the engine - it asks for an answer that is not the primary route's, and the routing layer decides which that is. This is the cross-agency second-engine-crosscheck skill, as a tool"

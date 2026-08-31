@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,13 @@ def route_for(actor: str) -> list[Route]:
     return parse_route(tables.resolve_actor(actor).get("engine", ""))
 
 
+def _as_text(prompt: Any) -> str:
+    """A prompt is either one string or a whole conversation. Both have to be measurable."""
+    if isinstance(prompt, str):
+        return prompt
+    return json.dumps(prompt, ensure_ascii=False, sort_keys=True, default=str)
+
+
 def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -76,15 +84,33 @@ class EngineWrapper:
         self.timeout = float(timeout if timeout is not None else tables.control_int("engine_timeout_seconds", "runtime"))
 
     # NOTE: no `provider`, no `model`, no `engine` parameter. That absence is the iron rule.
-    def call(self, *, run_id: str, step: str, actor: str, purpose: str, prompt: str, system: str | None = None) -> dict[str, Any]:
+    #
+    # `prefer_alternate` is NOT an exception to it. It asks for a DIFFERENT answer than the
+    # primary route would give -- which is what a second-engine crosscheck means -- and the
+    # routing layer still decides which route that is. The caller names nothing.
+    def call(
+        self,
+        *,
+        run_id: str,
+        step: str,
+        actor: str,
+        purpose: str,
+        prompt: Any,
+        system: str | None = None,
+        image: str | None = None,
+        tool_declarations: list[dict[str, Any]] | None = None,
+        prefer_alternate: bool = False,
+    ) -> dict[str, Any]:
         routes = route_for(actor)
         if not routes:
             raise EngineUnavailable(f"{actor} has no engine route in agents.csv")
+        if prefer_alternate and len(routes) > 1:
+            routes = routes[1:] + routes[:1]
         attempts: list[dict[str, Any]] = []
         for index, route in enumerate(routes):
             started = time.time()
             try:
-                result = self._perform(route, prompt, system)
+                result = self._perform(route, prompt, system, tool_declarations, image)
                 error = None
             except Exception as exc:
                 result, error = None, f"{type(exc).__name__}: {exc}"
@@ -105,8 +131,10 @@ class EngineWrapper:
                 "purpose": purpose,
                 "transport": self.transport,
                 "route": [str(r) for r in routes],
-                "prompt_sha256": _digest(prompt),
-                "prompt_chars": len(prompt),
+                "prompt_sha256": _digest(_as_text(prompt)),
+                "prompt_chars": len(_as_text(prompt)),
+                "has_image": bool(image),
+                "tools_offered": [t.get("name") or t.get("type") for t in (tool_declarations or [])],
                 **attempt,
             }
             if result is not None:
@@ -123,22 +151,87 @@ class EngineWrapper:
                     "transport": self.transport,
                     "usage": result.get("usage"),
                     "attempts": attempts,
+                    "output": result.get("output", []),
                 }
         raise EngineUnavailable(f"every route failed for {actor}: " + "; ".join(f"{a['provider']}/{a['model']}: {a['error']}" for a in attempts))
 
-    def _perform(self, route: Route, prompt: str, system: str | None) -> dict[str, Any]:
+    def _perform(self, route: Route, prompt: Any, system: str | None,
+                 tool_declarations: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:
+        text = _as_text(prompt)
         if self.transport == "echo":
             # Deterministic, offline, no credential anywhere. Used by the suite and by dry runs.
             return {
-                "text": f"echo[{route}] {_digest(prompt)[:16]}",
-                "usage": {"input_tokens": len(prompt) // 4, "output_tokens": 8},
+                "text": f"echo[{route}] {_digest(text)[:16]}",
+                "usage": {"input_tokens": len(text) // 4, "output_tokens": 8},
                 "provider_response_id": None,
+                "output": [],
             }
         assert self.client is not None
-        answer = self.client.complete(route.provider, route.model, prompt, system, self.timeout)
+        answer = self.client.complete(route.provider, route.model, prompt, system, self.timeout, tool_declarations, image)
         if not answer.get("ok"):
             raise RuntimeError(answer.get("error", "bridge refused the call"))
         return answer
+
+    # ------------------------------------------------------------------ the agent loop
+
+    def work(self, *, run_id: str, step: str, actor: str, purpose: str, prompt: str,
+             params: dict[str, str] | None = None, system: str | None = None) -> dict[str, Any]:
+        """One agent step that may actually WORK, not just answer once.
+
+        A step with no tools on its row is a single call and this is exactly `call`.
+        A step WITH tools goes round a loop -- think, ask for a tool, read the result,
+        think again -- until it answers or reaches `agent_loop_max_turns`. The ceiling is
+        never silent: reaching it is a record.
+        """
+        from . import tools as toolbox
+
+        specs = toolbox.granted(actor)
+        if not specs:
+            answer = self.call(run_id=run_id, step=step, actor=actor, purpose=purpose, prompt=prompt, system=system)
+            return {**answer, "turns": 1, "tool_calls": []}
+
+        declarations = [spec.declaration() for spec in specs]
+        context = toolbox.ToolContext(run_id=run_id, step=step, actor=actor, params=dict(params or {}), engine=self)
+        conversation: list[Any] = [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]
+        ceiling = tables.control_int("agent_loop_max_turns", "runtime")
+        performed: list[dict[str, Any]] = []
+        answer: dict[str, Any] = {}
+
+        for turn in range(1, ceiling + 1):
+            answer = self.call(
+                run_id=run_id, step=step, actor=actor, purpose=f"{purpose}:turn-{turn}",
+                prompt=conversation, system=system, tool_declarations=declarations,
+            )
+            requests = [item for item in answer.get("output", []) if item.get("type") == "function_call"]
+            conversation.extend(answer.get("output", []))
+            if not requests:
+                return {**answer, "turns": turn, "tool_calls": performed}
+            for request in requests:
+                name = request.get("name", "")
+                try:
+                    arguments = json.loads(request.get("arguments") or "{}")
+                except ValueError:
+                    arguments = {}
+                started = time.time()
+                result = toolbox.run_tool(name, arguments, context)
+                record = {
+                    "tool": name,
+                    "arguments": {k: str(v)[:200] for k, v in arguments.items()},
+                    "ok": "error" not in result,
+                    "error": result.get("error"),
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    "turn": turn,
+                }
+                performed.append(record)
+                self.sink.emit("tool_call", run_id=run_id, step=step, actor=actor, **record)
+                conversation.append({
+                    "type": "function_call_output",
+                    "call_id": request.get("call_id"),
+                    "output": toolbox.as_json(result),
+                })
+
+        self.sink.emit("agent_loop_ceiling", run_id=run_id, step=step, actor=actor, ceiling=ceiling, tool_calls=len(performed))
+        return {**answer, "turns": ceiling, "tool_calls": performed, "ceiling_reached": True}
 
 
 def call_signature_forbids_model() -> bool:

@@ -322,3 +322,83 @@ def test_the_record_is_append_only_jsonl(tmp_path):
 def test_a_gate_request_knows_which_decisions_it_accepts():
     assert GateRequest("r", "4", "human-gate", "Yakov").decisions == {"approve", "reject"}
     assert GateRequest("r", "41", "wait-external", "Integration").decisions == {"received", "cancel"}
+
+
+# ---------------------------------------------------------------------------- tools
+
+
+def test_a_tool_is_only_offered_if_the_catalogue_declares_it_and_the_row_grants_it():
+    from golem_runtime import tools
+
+    report = tools.coverage()
+    assert report["asked_but_not_declared"] == []      # no row asks for a tool tools.csv does not know
+    assert report["implemented_but_not_declared"] == []  # nothing exists outside the catalogue
+    granted = [spec.name for spec in tools.granted("Data gathering")]
+    assert "WebSearch" in granted and "Write" in granted
+    assert "Consult" not in granted                    # its row does not grant it
+    assert tools.granted("Yakov") == []                # the human owner runs no tools
+
+
+def test_a_tool_cannot_reach_where_the_mount_list_does_not_reach(tmp_path):
+    from golem_runtime import tools
+
+    product = tmp_path / "product"
+    product.mkdir()
+    params = {"${product_path}": str(product)}
+
+    writer = tools.ToolContext("r", "1", "Engineering Lead", params)
+    assert "written" in tools.run_tool("Write", {"path": "note.md", "content": "hello"}, writer)
+    assert (product / "note.md").read_text() == "hello"
+
+    # Two independent layers refuse, and they refuse for different reasons.
+    # Layer one, the GRANT: the Validator's row does not name Write at all.
+    reader = tools.ToolContext("r", "1", "Validator", params)
+    assert "no tool named 'Write'" in tools.run_tool("Write", {"path": "note.md", "content": "x"}, reader)["error"]
+    assert tools.run_tool("Read", {"path": "note.md"}, reader)["content"] == "hello"
+
+    # Layer two, the MOUNT LIST: Rendering has Write, but its row mounts only the product
+    # path -- so the same tool cannot touch the tables.
+    renderer = tools.ToolContext("r", "1", "Rendering", params)
+    assert "written" in tools.run_tool("Write", {"path": "render.txt", "content": "x"}, renderer)
+    assert "may not write" in tools.run_tool("Write", {"path": "/srv/runtime/tables/flow.csv", "content": "x"}, renderer)["error"]
+
+
+def test_a_tool_may_not_escape_the_product_folder(tmp_path):
+    from golem_runtime import tools
+
+    params = {"${product_path}": str(tmp_path / "product")}
+    ctx = tools.ToolContext("r", "1", "Engineering Lead", params)
+    assert "may not read" in tools.run_tool("Read", {"path": "/etc/passwd"}, ctx)["error"]
+    assert "may not write" in tools.run_tool("Write", {"path": "/srv/golem/CLAUDE.md", "content": "x"}, ctx)["error"]
+
+
+def test_a_tool_failure_is_an_answer_and_not_a_crash(tmp_path):
+    from golem_runtime import tools
+
+    ctx = tools.ToolContext("r", "1", "Data gathering", {"${product_path}": str(tmp_path)})
+    assert "error" in tools.run_tool("WebFetch", {"url": "ftp://example.com"}, ctx)
+    assert "error" in tools.run_tool("Read", {"path": "missing.md"}, ctx)
+    assert "wrong arguments" in tools.run_tool("Write", {"path": "a.md"}, ctx)["error"]
+
+
+def test_a_step_with_no_tools_is_still_a_single_call(tmp_path):
+    from golem_runtime.engine import EngineWrapper
+
+    sink = RecordSink("noloop", tmp_path)
+    answer = EngineWrapper(sink, transport="echo").work(
+        run_id="noloop", step="1", actor="Orchestrator", purpose="agent-step", prompt="hello"
+    )
+    assert answer["turns"] == 1 and answer["tool_calls"] == []
+    assert len(sink.of_event("engine_call")) == 1
+
+
+def test_the_second_engine_asks_for_a_different_answer_without_naming_one():
+    """`prefer_alternate` rotates the row's own preference order. It names no model."""
+    import inspect as _inspect
+
+    from golem_runtime.engine import EngineWrapper
+
+    assert "prefer_alternate" in _inspect.signature(EngineWrapper.call).parameters
+    assert engine.call_signature_forbids_model()
+    routes = engine.route_for("Analyst")
+    assert len(routes) == 2  # so rotating gives a genuinely different route
