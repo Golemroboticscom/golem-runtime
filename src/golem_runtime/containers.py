@@ -82,6 +82,11 @@ def agent_access(actor: str, params: dict[str, str] | None = None) -> dict[str, 
         "mounts": parse_mounts(row.get("mounts", ""), params),
         "network": row.get("network", "") or "none",
         "secrets": row.get("secrets", "") or "none",
+        # WHICH container an agent runs in is a field too, for the same reason network and
+        # secrets are: the Engineering Lead needs FreeCAD and CalculiX in its image, and the
+        # Analyst does not. Naming the image in code would freeze that.
+        # A row with no engine is a human, and a human does not run in a container at all.
+        "image": row.get("image", "") or (DEFAULT_IMAGE if row.get("engine") else ""),
     }
 
 
@@ -105,8 +110,9 @@ def may_write(actor: str, path: Path | str, params: dict[str, str] | None = None
     return False
 
 
-def podman_argv(actor: str, command: list[str], params: dict[str, str] | None = None, image: str = DEFAULT_IMAGE) -> list[str]:
+def podman_argv(actor: str, command: list[str], params: dict[str, str] | None = None, image: str | None = None) -> list[str]:
     access = agent_access(actor, params)
+    image = image or access["image"]
     argv = ["sudo", "-n", "-u", CONTAINER_USER, "env"]
     argv += [f"{k}={v}" for k, v in PODMAN_ENV.items()]
     argv += ["podman", "run", "--rm", "--name", f"golem-{re.sub(r'[^a-zA-Z0-9]+', '-', access['agent']).strip('-').lower()}"]
@@ -128,13 +134,14 @@ def podman_argv(actor: str, command: list[str], params: dict[str, str] | None = 
     return argv
 
 
-def run(actor: str, command: list[str], params: dict[str, str] | None = None, image: str = DEFAULT_IMAGE, timeout: float = 600) -> subprocess.CompletedProcess:
+def run(actor: str, command: list[str], params: dict[str, str] | None = None, image: str | None = None, timeout: float = 600) -> subprocess.CompletedProcess:
     return subprocess.run(podman_argv(actor, command, params, image), capture_output=True, text=True, timeout=timeout)
 
 
 def describe(actor: str, params: dict[str, str] | None = None) -> str:
     access = agent_access(actor, params)
-    lines = [f"{actor} -> {access['agent']}", f"  network: {access['network']}", f"  secrets: {access['secrets']}"]
+    lines = [f"{actor} -> {access['agent']}", f"  image:   {access['image']}",
+             f"  network: {access['network']}", f"  secrets: {access['secrets']}"]
     lines += [f"  mount:   {m.source} ({m.mode})" for m in access["mounts"]] or ["  mount:   (nothing)"]
     lines.append("  command: " + shlex.join(podman_argv(actor, ["python3", "-c", "..."], params)))
     return "\n".join(lines)

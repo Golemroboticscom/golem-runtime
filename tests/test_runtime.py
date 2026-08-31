@@ -304,6 +304,16 @@ def test_network_and_secrets_are_fields_on_the_row_not_facts_in_the_code():
 def test_the_human_owner_gets_no_container_boundary():
     access = containers.agent_access("Yakov")
     assert access["mounts"] == [] and access["network"] == "none" and access["secrets"] == "none"
+    assert access["image"] == ""  # a human does not run in a container at all
+
+
+def test_the_container_image_is_a_field_like_network_and_secrets():
+    """The Engineering Lead needs FreeCAD and CalculiX; the Analyst needs neither."""
+    assert containers.agent_access("Engineering Lead")["image"] == "golem-runtime-cad:phase-a"
+    assert containers.agent_access("Simulation")["image"] == "golem-runtime-cad:phase-a"
+    assert containers.agent_access("Analyst")["image"] == containers.DEFAULT_IMAGE
+    argv = containers.podman_argv("Engineering Lead", ["true"], {"${product_path}": "/tmp/p"})
+    assert "golem-runtime-cad:phase-a" in argv
 
 
 # ------------------------------------------------------------------------------ record
