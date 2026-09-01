@@ -75,9 +75,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "run":
         run_id = args.run_id or _new_run_id(args.flow)
         if args.gate == "telegram":
-            from .gates import TelegramGate
+            from .gates import MixedGate, TelegramGate
 
-            gate = TelegramGate()
+            gate = MixedGate(TelegramGate())
         else:
             gate = AutoGate()
         runner = Run(run_id, args.flow, gate=gate, transport=args.transport, state_store=args.store)

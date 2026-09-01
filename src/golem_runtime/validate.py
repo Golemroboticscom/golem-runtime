@@ -118,6 +118,16 @@ def validate_flow(flow_name: str, runtime_params: dict[str, str] | None = None, 
         row["step"]: split_targets(row.get("next", ""), flow_name) + split_targets(row.get("loop_back_to", ""), flow_name)
         for row in rows
     }
+    # An EXIT is a door out of a step, not a step that follows it, so no `next` points at one
+    # and reachability could never see it (Yakov #6834; F2-single's five E-rows were reported
+    # unreachable for exactly this reason). `exit_from` is where that edge now lives: the exit
+    # row names the step it may leave, and the edge is read in the direction the run travels.
+    for row in rows:
+        for source in split_targets(row.get("exit_from", ""), flow_name):
+            if source not in known:
+                errors.append(f"{row['step']}: exit_from names an unknown step {source!r}")
+            else:
+                adjacency.setdefault(source, []).append(row["step"])
     seen: set[str] = set()
     stack = [ids[0]] if ids else []
     terminal_seen = False

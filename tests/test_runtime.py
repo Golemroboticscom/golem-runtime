@@ -25,10 +25,10 @@ from golem_runtime.validate import FlowInvalid, validate_all_flows, validate_flo
 FLOW = "design-robot"
 
 
-def make_run(tmp_path: Path, name: str, gate=None, **kwargs) -> Run:
+def make_run(tmp_path: Path, name: str, gate=None, flow: str = FLOW, **kwargs) -> Run:
     return Run(
         name,
-        FLOW,
+        flow,
         gate=gate or AutoGate(),
         transport="echo",
         checkpoint_dir=tmp_path / "checkpoints",
@@ -41,10 +41,10 @@ def make_run(tmp_path: Path, name: str, gate=None, **kwargs) -> Run:
 # ------------------------------------------------------------------ tables and preflight
 
 
-def test_tables_are_the_source_and_the_flow_has_its_48_rows():
+def test_tables_are_the_source_and_the_flow_has_its_44_rows():
     assert FLOW in tables.flow_names()
     rows = tables.flow(FLOW)
-    assert len(rows) == 48
+    assert len(rows) == 44
     assert {"43a", "43b"}.issubset({r["step"] for r in rows})
 
 
@@ -52,7 +52,7 @@ def test_the_design_robot_flow_passes_preflight_and_the_report_names_any_flow_th
     report = validate_all_flows()
     assert set(report) == set(tables.flow_names()) - {"any"}
     assert "error" not in report[FLOW]
-    assert report[FLOW]["kinds"] == {"agent-step": 31, "human-gate": 12, "outbound-send": 2, "wait-external": 2, "script-step": 1}
+    assert report[FLOW]["kinds"] == {"agent-step": 33, "human-gate": 10, "script-step": 1}
     assert report[FLOW]["terminals"] == ["END:Validated"]
     # A flow that does not validate is REPORTED, never silently skipped.
     assert all("flow" in verdict for verdict in report.values())
@@ -105,9 +105,9 @@ def test_the_full_design_robot_flow_runs_from_start_to_finish(tmp_path):
     summary = make_run(tmp_path, "full").execute(fixture_params(FLOW))
     assert summary["status"] == "completed"
     assert summary["terminal"] == "END:Validated"
-    assert summary["distinct_steps"] == 48
-    assert summary["approvals"] == 12
-    assert summary["external_inputs"] == 2
+    assert summary["distinct_steps"] == 44
+    assert summary["approvals"] == 10
+    assert summary["external_inputs"] == 0
     assert summary["artifacts"] == 1
 
 
@@ -130,13 +130,20 @@ def test_a_gate_rejection_cancels_the_run_before_the_next_effect(tmp_path):
     assert summary["approvals"] == 0
 
 
-def test_an_external_wait_stops_and_resumes_with_its_provenance(tmp_path):
-    run = make_run(tmp_path, "external")
-    run.execute(fixture_params(FLOW))
-    answered = {r["step"]: r for r in run.sink.of_event("gate_answered")}
-    assert answered["41"]["decision"] == "received"
-    assert answered["41"]["provenance"].startswith("auto-gate")
-    assert answered["4"]["decision"] == "approve"
+def test_an_external_wait_answers_with_received_and_carries_its_provenance():
+    """No LIVE flow waits on the outside world any more, so this is tested on the channel.
+
+    design-robot lost both of its waits when the supplier emails became a web search and CAD
+    modelling (#6801, #6812). The only other wait rows are F2-single's E-rows, and that flow
+    does not currently validate -- its E-rows are unreachable -- so it cannot carry an
+    end-to-end test either. What is still true, and still worth guarding, is that a wait
+    answers `received` and never `approve`, and that the answer names who gave it.
+    """
+    request = GateRequest("r", "E2", "wait-external", "Integration")
+    answer = AutoGate().ask(request)
+    assert answer["decision"] == "received"
+    assert answer["provenance"].startswith("auto-gate")
+    assert answer["actor"] == "auto"
 
 
 def test_the_gate_asks_before_every_gate_row(tmp_path):
@@ -211,25 +218,25 @@ def test_a_step_re_entered_after_a_gate_does_not_perform_its_effect_twice(tmp_pa
     """LangGraph re-runs a node from the top when its interrupt is answered. Every gate row
     therefore executes its body twice, and the effect log is what makes that harmless."""
     make_run(tmp_path, "once").execute(fixture_params(FLOW))
-    assert EffectLog(tmp_path / "effects.sqlite").count("once") == 48
+    assert EffectLog(tmp_path / "effects.sqlite").count("once") == 44
 
 
 def test_a_run_that_dies_at_a_gate_resumes_from_its_checkpoint_and_finishes(tmp_path):
     class Deserter(AutoGate):
         def ask(self, request):
-            if request.step == "17":
+            if request.step == "13":
                 raise RuntimeError("the operator walked away")
             return super().ask(request)
 
     first = make_run(tmp_path, "resume", gate=Deserter())
     assert first.execute(fixture_params(FLOW))["status"] == "failed"
     performed_before = EffectLog(tmp_path / "effects.sqlite").count("resume")
-    assert 0 < performed_before < 48
+    assert 0 < performed_before < 44
 
     second = make_run(tmp_path, "resume")  # same run id, same checkpoint, same effect log
     summary = second.execute(fixture_params(FLOW), resume=True)
     assert summary["terminal"] == "END:Validated"
-    assert EffectLog(tmp_path / "effects.sqlite").count("resume") == 48
+    assert EffectLog(tmp_path / "effects.sqlite").count("resume") == 44
     # The record continued its sequence rather than restarting it.
     assert [e["seq"] for e in second.sink.read()] == list(range(1, len(second.sink.read()) + 1))
 
@@ -733,3 +740,67 @@ def test_the_gate_shows_the_file_and_not_the_sentence_about_the_file(tmp_path):
     # With no file, the answer itself is still the deliverable.
     request.deliverable_files = []
     assert "written the register" in channel._question(request)
+
+
+def test_a_watcher_span_never_yields_twice_when_the_body_raises():
+    """The bug that killed a live 25-step run at gate 28 (2026-09-01).
+
+    LangGraph suspends a gate by RAISING out of the node, so that exception is thrown into
+    the observation contextmanager wrapping it. The old shape caught it and yielded a SECOND
+    time, which Python answers with "generator didn't stop after throw()" -- killing the run
+    and putting its own error where the real one belonged. Every span must yield exactly once.
+    """
+    from golem_runtime import observe
+
+    spans = [
+        lambda: observe.llm_span(run_id="r", step="1", actor="a", purpose="p", provider="x",
+                                 model="m", prompt="hi", system=None, tools=[]),
+        lambda: observe.tool_span(run_id="r", step="1", actor="a", tool="Read", arguments={}),
+        lambda: observe.gate_span(run_id="r", step="1", actor="Yakov", question="?",
+                                  deliverable_actor="a", deliverable_step="0"),
+    ]
+    for make in spans:
+        with pytest.raises(ValueError):          # the body's own error, not the generator's
+            with make():
+                raise ValueError("the node suspended")
+
+
+def test_a_long_gate_message_is_cut_without_orphaning_a_tag():
+    """`text[:4000]` cut inside a <blockquote> and Telegram refused the send four times,
+    which killed a live run at step 28 (2026-09-01). A cut must never make the message
+    unsendable."""
+    from golem_runtime.telegram import Telegram
+
+    text = "<blockquote expandable>" + ("x" * 5000) + "</blockquote>"
+    cut = Telegram.fit(text, 4000)
+    assert len(cut) <= 4000 + len("</blockquote>")
+    assert cut.count("<blockquote") == cut.count("</blockquote>") == 1
+    assert Telegram.fit("<b>short</b>", 4000) == "<b>short</b>"
+    nested = "<b>a<code>b" + "y" * 5000 + "</code></b>"
+    assert Telegram.fit(nested, 4000).endswith("</code></b>")
+
+
+def test_a_gate_after_a_gate_shows_the_work_not_the_previous_decision(tmp_path):
+    """Gate 37 follows gate 36, and it showed gate 36's answer: "approve", 31 characters,
+    submitted by Yakov. An empty gate over real work (#6926). It must walk back past a
+    gate to the last step that produced something."""
+    gate = AutoGate()
+    make_run(tmp_path, "afterthegate", gate=gate).execute(fixture_params(FLOW))
+    kinds = {r["step"]: r["kind"] for r in tables.flow(FLOW)}
+    for request in gate.asked:
+        if request.deliverable_step:
+            assert kinds.get(request.deliverable_step) not in {"human-gate", "wait-external"}, request.step
+
+
+def test_a_gate_shows_ITS_OWN_runs_files_and_never_another_runs(tmp_path):
+    """The effect log is shared by every run. `WHERE step=?` with no run_id handed a gate
+    the files of whatever run last had a step by that number -- so a gate reported "wrote no
+    file" over three files the step had just written (#6929)."""
+    first = make_run(tmp_path, "runA")
+    first.execute(fixture_params(FLOW))
+    gate = AutoGate()
+    second = make_run(tmp_path, "runB", gate=gate)      # same effects.sqlite, same steps
+    second.execute(fixture_params(FLOW))
+    for request in gate.asked:
+        for name in request.deliverable_files:
+            assert "runA" not in name, f"gate {request.step} was shown run A's file: {name}"

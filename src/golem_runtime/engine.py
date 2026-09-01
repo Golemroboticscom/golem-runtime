@@ -56,13 +56,20 @@ def parse_route(spec: str) -> list[Route]:
     return routes
 
 
-def route_for(actor: str, step_engine: str = "") -> list[Route]:
+def route_for(actor: str, step_engine: str = "", difficulty: str = "") -> list[Route]:
     """The routing decision, read from the tables. The caller does not get a say.
 
-    Two places may hold it, and the more specific wins:
+    Three places may hold it, and the more specific wins:
 
       1. the `engine` column of the STEP's row in flow.csv -- empty on every row by default
-      2. the `engine` column of the ACTOR's row in agents.csv
+      2. the `difficulty` column of that same row, mapped through `engine_for_high_difficulty`
+      3. the `engine` column of the ACTOR's row in agents.csv
+
+    Layer 2 is the one that earns its keep (Yakov #6833). A flow row says how HARD its work
+    is -- a property of the work, which the table is entitled to know -- and THIS function,
+    the routing layer, is the only thing that turns hardness into a model. The row never
+    carries a model name, so the iron rule survives intact: the agent engine never asks for
+    a specific model.
 
     That is the whole of it. `parse_route` already understood `a/b>c/d` cascades and
     `EngineWrapper.call` already walked them; this adds one lookup and no new machinery.
@@ -70,6 +77,8 @@ def route_for(actor: str, step_engine: str = "") -> list[Route]:
     speaking -- not the agent asking, which is what the iron rule forbids.
     """
     routes = parse_route(step_engine)
+    if not routes and difficulty.strip().lower() == "high":
+        routes = parse_route(tables.control("engine_for_high_difficulty", "routing", default=""))
     return routes if routes else parse_route(tables.resolve_actor(actor).get("engine", ""))
 
 
@@ -117,8 +126,9 @@ class EngineWrapper:
         tool_declarations: list[dict[str, Any]] | None = None,
         prefer_alternate: bool = False,
         step_engine: str = "",
+        difficulty: str = "",
     ) -> dict[str, Any]:
-        routes = route_for(actor, step_engine)
+        routes = route_for(actor, step_engine, difficulty)
         if not routes:
             raise EngineUnavailable(f"{actor} has no engine route in agents.csv")
         if prefer_alternate:
@@ -210,7 +220,7 @@ class EngineWrapper:
 
     def work(self, *, run_id: str, step: str, actor: str, purpose: str, prompt: str,
              params: dict[str, str] | None = None, system: str | None = None,
-             step_engine: str = "") -> dict[str, Any]:
+             step_engine: str = "", difficulty: str = "") -> dict[str, Any]:
         """One agent step that may actually WORK, not just answer once.
 
         A step with no tools on its row is a single call and this is exactly `call`.
@@ -223,7 +233,7 @@ class EngineWrapper:
         specs = toolbox.granted(actor)
         if not specs:
             answer = self.call(run_id=run_id, step=step, actor=actor, purpose=purpose, prompt=prompt,
-                               system=system, step_engine=step_engine)
+                               system=system, step_engine=step_engine, difficulty=difficulty)
             return {**answer, "turns": 1, "tool_calls": []}
 
         declarations = [spec.declaration() for spec in specs]
@@ -237,7 +247,7 @@ class EngineWrapper:
             answer = self.call(
                 run_id=run_id, step=step, actor=actor, purpose=f"{purpose}:turn-{turn}",
                 prompt=conversation, system=system, tool_declarations=declarations,
-                step_engine=step_engine,
+                step_engine=step_engine, difficulty=difficulty,
             )
             requests = [item for item in answer.get("output", []) if item.get("type") == "function_call"]
             conversation.extend(answer.get("output", []))

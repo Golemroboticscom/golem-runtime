@@ -140,6 +140,34 @@ class AutoGate:
         pass
 
 
+def unattended_steps() -> set[str]:
+    """Which gates answer themselves this run -- a table cell, never a constant here."""
+    raw = tables.control("unattended_gates", "runtime", default="")
+    return {piece for piece in raw.replace(",", " ").split() if piece}
+
+
+class MixedGate:
+    """Some gates ask a human, the rest answer themselves. The list is `unattended_gates`.
+
+    Yakov #6809: cancel the six least important gates, so a full run does not cost twelve
+    answers. **Cancelling a gate is a RUN setting, not an amputation of the flow** -- the 48
+    canonical rows stay exactly as ruling 17 requires, and every step nobody was asked about
+    is stamped `unattended` in the record, so the trace never pretends a human decided.
+    """
+
+    def __init__(self, human: GateChannel, unattended: set[str] | None = None):
+        self.human = human
+        self.unattended = set(unattended) if unattended is not None else unattended_steps()
+        self.auto = AutoGate(actor="auto", provenance="unattended")
+
+    def ask(self, request: GateRequest) -> dict[str, str]:
+        channel = self.auto if request.step in self.unattended else self.human
+        return channel.ask(request)
+
+    def announce(self, run_id: str, text: str) -> None:
+        self.human.announce(run_id, text)
+
+
 def _label(decision: str) -> str:
     return {"approve": "✅ approve", "reject": "⛔ reject", "received": "✅ received", "cancel": "⛔ cancel"}[decision]
 
@@ -220,10 +248,16 @@ class TelegramGate:
             lines += [f"👤 <b>{html.escape(request.deliverable_actor)}</b> finished step "
                       f"{request.deliverable_step} · {size}", ""]
 
-        # 2. the deliverable, as a reading copy
+        # 2. the deliverable, as a reading copy.
+        # The excerpt is budgeted against what the rest of the message will cost, because
+        # Telegram's ceiling is on the WHOLE message: a fixed 3200-character excerpt plus a
+        # long question is over the limit, and the cut used to fall inside the blockquote.
+        spent = sum(len(line) + 1 for line in lines) + len(request.question or request.action or "") + 400
+        room = max(600, Telegram.LIMIT - spent - 200)
+        excerpt = min(self.EXCERPT, room)
         if body:
-            lines += ["<blockquote expandable>" + as_telegram_html(body[: self.EXCERPT]) + "</blockquote>"]
-            if len(body) > self.EXCERPT:
+            lines += ["<blockquote expandable>" + as_telegram_html(body[:excerpt]) + "</blockquote>"]
+            if len(body) > excerpt:
                 lines.append("<i>…cut here. The whole thing is attached above.</i>")
             lines.append("")
         else:

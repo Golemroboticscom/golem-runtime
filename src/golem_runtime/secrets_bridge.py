@@ -164,7 +164,106 @@ def _call_xai(creds: dict[str, str], model: str, prompt: Any, system: str | None
     }
 
 
-PERFORMERS = {"openai": _call_openai, "google": _call_google, "xai": _call_xai}
+def _claude_slot(timeout: float):
+    """The Max seat is ONE session, and a cloned credential invalidates itself.
+
+    So a call here waits its turn on the SAME kernel flock the rest of the system already
+    queues on -- `/srv/golem/shared/claude-session/slot.lock`. The path is shared; the code
+    is not. Nothing is imported from `/srv/golem` (ruling 3): a flock is four lines, and
+    duplicating four lines is cheaper than crossing that boundary for them.
+    """
+    import contextlib
+    import fcntl
+
+    @contextlib.contextmanager
+    def _held():
+        try:
+            handle = open(CLAUDE_SLOT_LOCK, "a")
+        except OSError:                      # no lock to take: run rather than refuse
+            yield
+            return
+        deadline = time.time() + timeout
+        try:
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.time() > deadline:
+                        raise TimeoutError("the Claude seat did not free up in time")
+                    time.sleep(2)
+            yield
+        finally:
+            with contextlib.suppress(Exception):
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            handle.close()
+
+    return _held()
+
+
+CLAUDE_SLOT_LOCK = "/srv/golem/shared/claude-session/slot.lock"
+
+
+def _call_anthropic(creds: dict[str, str], model: str, prompt: Any, system: str | None, timeout: float,
+                    tools: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:
+    """Claude on the Max subscription, through its own CLI, from the user that holds it.
+
+    This bridge already runs as `interface-lead`, and the subscription credential lives in
+    that user's home in mode 600 -- which is exactly why this function can exist here and
+    nowhere else. **The credential is never read, never copied and never moved**; the CLI
+    uses it in place. Copying it is what invalidates it, so not copying it is the design.
+
+    Tools and images are not offered on this route: it exists for the two judgement roles --
+    the review between steps and the closing report -- and those read text and answer text.
+
+    **The seat wait is bounded and there is NO substitute engine** (#6881). Measured
+    2026-09-01: the Telegram bridge takes the seat around ONE reply to Yakov and releases it,
+    so the seat is free whenever he is not being answered. A judgement call waits three
+    minutes for it and then gives up, and the run carries on WITHOUT that review. It does not
+    fall through to another engine: Yakov asked for Claude on the Max subscription to do the
+    judging, and quietly letting a different model do it instead would be answering a
+    different question. A missed review is recorded as missed.
+    """
+    import subprocess
+
+    binary = creds.get("binary") or "/opt/golem-claude/bin/claude"
+    text = prompt if isinstance(prompt, str) else json.dumps(prompt, ensure_ascii=False, default=str)
+    if system:
+        text = f"{system}\n\n---\n\n{text}"
+    # WHERE IT MAY READ. Measured on run simple-carrier-3: fifteen of the between-step
+    # reviews opened with "read access to the artifacts was denied, so I judged on the
+    # described deliverables" -- because this ran with cwd=/tmp and the CLI only trusts its
+    # own working directory. A reviewer that cannot open the file it is reviewing is judging
+    # a summary of the work, which is exactly what a review is supposed to replace. The
+    # artifacts root is added explicitly; nothing else is.
+    reads = creds.get("readable_root") or "/srv/runtime/artifacts"
+    argv = [binary, "-p", text, "--output-format", "json", "--add-dir", reads]
+    if model:
+        argv += ["--model", model]
+    with _claude_slot(float(creds.get("seat_wait_seconds") or 90)):
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                              cwd=reads if os.path.isdir(reads) else "/tmp")
+    if done.returncode != 0:
+        raise RuntimeError(f"claude cli exited {done.returncode}: {(done.stderr or done.stdout)[:400]}")
+    try:
+        data = json.loads(done.stdout)
+    except ValueError as exc:
+        raise RuntimeError(f"claude cli returned no JSON: {exc}; {done.stdout[:300]}") from exc
+    usage = data.get("usage") or {}
+    return {
+        "text": data.get("result") or "",
+        "usage": {"input_tokens": usage.get("input_tokens"), "output_tokens": usage.get("output_tokens")},
+        "provider_response_id": data.get("session_id"),
+        "output": [],
+    }
+
+
+PERFORMERS = {"openai": _call_openai, "google": _call_google, "xai": _call_xai, "anthropic": _call_anthropic}
+
+
+def _usable(provider: str, creds: dict[str, str]) -> bool:
+    """A credential is not always an api_key. The Max route's credential is a USER."""
+    return bool(creds.get("api_key") or creds.get("via"))
 
 
 # --------------------------------------------------------------- non-model services
@@ -299,13 +398,13 @@ def perform_service(service: str, arguments: dict[str, Any]) -> dict[str, Any]:
 
 def served_providers() -> list[str]:
     """Which providers this bridge can actually perform a call for, right now."""
-    return sorted(p for p, creds in load_providers().items() if p in PERFORMERS and creds.get("api_key"))
+    return sorted(p for p, creds in load_providers().items() if p in PERFORMERS and _usable(p, creds))
 
 
 def perform(provider: str, model: str, prompt: Any, system: str | None = None, timeout: float = 600.0,
             tools: list[dict[str, Any]] | None = None, image: str | None = None) -> dict[str, Any]:
     creds = load_providers().get(provider)
-    if not creds or not creds.get("api_key"):
+    if not creds or not _usable(provider, creds):
         raise LookupError(f"the bridge holds no credential for provider {provider!r}")
     if provider not in PERFORMERS:
         raise LookupError(f"the bridge cannot perform calls for provider {provider!r} in phase A")

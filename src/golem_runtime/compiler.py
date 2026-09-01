@@ -47,6 +47,7 @@ class RunState(TypedDict, total=False):
     loop_counts: dict[str, int]
     route_plan: dict[str, list[str]]
     artifacts: list[dict[str, Any]]
+    notes: dict[str, str]
     cancel_requested: bool
 
 
@@ -88,7 +89,42 @@ def system_prompt(row: dict[str, str], state: RunState) -> str:
         "The rules that bind you, whatever the step asks:",
     ]
     lines += [f"  - {rule}" for rule in IRON_RULES]
+    skills = _skill_bodies(agent.get("skills", ""))
+    if skills:
+        lines += ["", "How this system does the parts of the work you are about to do. These are OUR"
+                      " methods, written down; follow them rather than inventing your own:", "", skills]
     return "\n".join(line for line in lines if line != "" or True).strip()
+
+
+def _skill_bodies(declared: str) -> str:
+    """The skill's TEXT, not its name. Naming it taught the model nothing (Yakov #6838).
+
+    Which skills an agent holds is the `skills` column of its row; what a skill SAYS is the
+    file under `skills/<name>/SKILL.md`. Bounded by `skill_chars_in_prompt`, because a
+    system prompt is paid for on every turn of every step -- token economy is a rule here,
+    not a preference, and a truncation is always announced rather than silent.
+    """
+    from .paths import SKILLS_DIR
+
+    names = [n for n in declared.replace(";", " ").replace(",", " ").split() if n]
+    if not names:
+        return ""
+    budget = tables.control_int("skill_chars_in_prompt", "runtime", default=6000)
+    out, spent = [], 0
+    for name in names:
+        path = SKILLS_DIR / name / "SKILL.md"
+        if not path.is_file():
+            continue
+        body = path.read_text(encoding="utf-8", errors="replace").strip()
+        room = budget - spent
+        if room <= 400:
+            out.append(f"## {name}\n[not included: the skill budget of {budget} characters is spent]")
+            break
+        if len(body) > room:
+            body = body[:room].rstrip() + f"\n[truncated at {room} characters of {len(body)}]"
+        out.append(f"## {name}\n{body}")
+        spent += len(body)
+    return "\n\n".join(out)
 
 
 def _toolbox():
@@ -141,8 +177,40 @@ def build_prompt(row: dict[str, str], state: RunState) -> str:
         lines.append(f"NOTE ON THIS STEP: {field('notes')}")
     if upstream:
         lines += ["", "WORK SO FAR:", upstream]
+    carried = [f"[after step {st}] {note}" for st, note in list(state.get("notes", {}).items())[-CARRY_STEPS:]]
+    if carried:
+        lines += ["", "WHAT THE REVIEW OF THE PREVIOUS STEPS ASKS YOU TO DO DIFFERENTLY:", *carried]
     lines += ["", "Answer with the deliverable itself. No preamble."]
     return "\n".join(line for line in lines if line is not None).strip()
+
+
+def _review_prompt(row: dict[str, str], deliverable: str, next_row: dict[str, str] | None, budget: int) -> str:
+    """Read what just came out, and improve what comes NEXT. Never send anything back.
+
+    Yakov #6842: between one step and the next, look at the deliverable and judge whether it
+    is accurate enough. If it is not, do NOT return it -- the run does not go backwards. Write
+    an instruction that makes the NEXT step sharper, or a note of your own, and let the flow
+    carry on. That is the whole rule, and it is why this is cheap: one short call per step, no
+    loop, no second attempt, no extra branch in the graph.
+    """
+    coming = (
+        f"The NEXT step is {next_row['step']} — {next_row['actor']} — {next_row.get('action','')}"
+        if next_row else "This was the last working step of the flow."
+    )
+    return (
+        f"You are the Interface, reviewing the work of this run as it goes.\n\n"
+        f"The step that just finished: {row['flow_name']} step {row['step']}, by {row['actor']}.\n"
+        f"It was asked to: {row.get('action','')}\n"
+        f"It was asked to deliver: {row.get('output','')}\n\n"
+        f"{coming}\n\n"
+        f"WHAT IT PRODUCED:\n{deliverable[:6000]}\n\n"
+        f"Judge whether this is accurate and complete enough to build on. "
+        f"YOU MAY NOT SEND IT BACK and you may not ask for it again — the run only moves forward. "
+        f"Write, in at most {budget} characters, an instruction that makes the NEXT step sharper: what to "
+        f"verify, what to treat as unproven, what to compensate for, what was assumed here. "
+        f"If the work is sound and nothing needs compensating, answer exactly: OK\n"
+        f"No preamble, no praise, no restating what it did."
+    )
 
 
 def _routing_prompt(row: dict[str, str], allowed: list[str]) -> str:
@@ -155,15 +223,24 @@ def _routing_prompt(row: dict[str, str], allowed: list[str]) -> str:
 
 
 def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate_context: dict[str, Any] | None = None) -> StateGraph:
-    def _files_of(step: str) -> list[str]:
-        """Which files that step wrote, read back out of the effect log."""
+    def _files_of(step: str, run_id: str) -> list[str]:
+        """Which files THIS RUN's step wrote, read back out of the effect log.
+
+        The run_id is not decoration. The effect log is one file shared by every run ever
+        performed, and this query used to ask only `WHERE step=?` and take the newest row.
+        So a gate asking about step 46a of tonight's run was shown the files of whatever run
+        last happened to have a step called 46a -- a fixture from the test suite, with no
+        files at all. What Yakov saw was a gate that said the step had written nothing, over
+        three files it had just written (#6929). A run must never read another run's work.
+        """
         import json as _json
         import sqlite3 as _sqlite3
 
         try:
             with _sqlite3.connect(effects.path) as db:
                 rows_ = db.execute(
-                    "SELECT payload FROM effects WHERE step=? ORDER BY rowid DESC LIMIT 1", (step,)
+                    "SELECT payload FROM effects WHERE step=? AND run_id=? ORDER BY rowid DESC LIMIT 1",
+                    (step, run_id),
                 ).fetchone()
             return list(_json.loads(rows_[0]).get("files") or []) if rows_ else []
         except Exception:
@@ -197,6 +274,7 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
             loop_counts = dict(state.get("loop_counts", {}))
             route_plan = copy.deepcopy(state.get("route_plan", {}))
             stored_artifacts = list(state.get("artifacts", []))
+            notes = dict(state.get("notes", {}))
             terminal = "END:Cancelled" if state.get("cancel_requested") else ""
 
             visit = sum(1 for s in trace if s == step)
@@ -228,6 +306,9 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                     replayed=not performed,
                     output_chars=len(payload.get("text", "")),
                 )
+                note = _review(row, payload.get("text", ""), run_id)
+                if note:
+                    notes[step] = note
 
             target = terminal or _choose(row, state, outputs, normal, loops, route_plan)
             if not terminal:
@@ -252,16 +333,56 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 "loop_counts": loop_counts,
                 "route_plan": route_plan,
                 "artifacts": stored_artifacts,
+                "notes": notes,
             }
             if terminal:
                 update["terminal"] = terminal
             return update
 
+        def _review(row: dict[str, str], deliverable: str, run_id: str) -> str:
+            """One short call between steps. Off by one table cell; never loops the run back."""
+            if row["kind"] in {"human-gate", "wait-external"} or not deliverable.strip():
+                return ""
+            if tables.control("forward_review", "runtime", default="on").strip().lower() != "on":
+                return ""
+            budget = tables.control_int("forward_note_chars", "runtime", default=600)
+            following = ref_to_step(row.get("next", ""), row["flow_name"]).split(" / ")[0]
+            next_row = next((r for r in rows if r["step"] == following), None)
+            try:
+                answer = engine.call(
+                    run_id=run_id, step=row["step"], actor="Interface", purpose="forward-review",
+                    prompt=_review_prompt(row, deliverable, next_row, budget),
+                    step_engine=tables.control("engine_for_judgement", "routing", default=""),
+                )
+            except Exception as exc:
+                # A review must never kill a run, and it must never be silently replaced.
+                # Yakov #6881: Claude on Max does the judging or nobody does. The step goes
+                # on unreviewed, and the record says so in as many words.
+                engine.sink.emit("forward_review", step=row["step"], ok=False, verdict="missed",
+                                 reason="the Max seat was not free", error=str(exc)[:200])
+                return ""
+            note = (answer.get("text") or "").strip()
+            if note.upper().startswith("OK") and len(note) <= 4:
+                engine.sink.emit("forward_review", step=row["step"], ok=True, verdict="clean", chars=0)
+                return ""
+            note = note[:budget]
+            engine.sink.emit("forward_review", step=row["step"], ok=True, verdict="note", chars=len(note), note=note)
+            return note
+
         def _ask(state: RunState, row: dict[str, str], kind: str) -> dict[str, str]:
             """Stop the graph. The runner carries the question to the surface and comes back."""
             # The gate is asked ABOUT something: the deliverable of the step just finished.
-            trace = state.get("trace", [])
-            previous = trace[-1] if trace else ""
+            # WHAT THE GATE IS ABOUT is the last step that actually DID something -- not
+            # simply the previous row. Two gates in a row (36 then 37) meant gate 37 showed
+            # gate 36's own decision: "approve", 31 characters, submitted by Yakov. Yakov
+            # saw an empty gate and rightly asked what was broken (#6926). A gate's answer
+            # is not a deliverable; walk back past it to the work it was about.
+            gate_kinds = {r["step"]: r["kind"] for r in rows}
+            previous = ""
+            for earlier in reversed(state.get("trace", [])):
+                if gate_kinds.get(earlier) not in {"human-gate", "wait-external"}:
+                    previous = earlier
+                    break
             question = {
                 "gate": kind,
                 "step": row["step"],
@@ -278,7 +399,7 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 "deliverable_actor": next((r["actor"] for r in rows if r["step"] == previous), ""),
                 # The files that step actually wrote. These are the deliverable; the answer
                 # text is only the covering note.
-                "deliverable_files": _files_of(previous),
+                "deliverable_files": _files_of(previous, state["run_id"]),
                 # The SHAPE of the ask, from the flow row. A table, not code (#6620).
                 "must_answer": row.get("must_answer", ""),
             }
@@ -314,6 +435,7 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 params=state.get("params", {}),
                 system=system_prompt(row, state),
                 step_engine=row.get("engine", ""),
+                difficulty=row.get("difficulty", ""),
             )
             reported = re.search(r"confidence\s*[:=]\s*(\d{1,3})\s*%", answer["text"], re.I)
             threshold = row.get("agent_confidence_threshold", "").strip()
@@ -381,6 +503,7 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 purpose="routing-decision",
                 prompt=_routing_prompt(row, allowed),
                 step_engine=row.get("engine", ""),
+                difficulty=row.get("difficulty", ""),
             )
             chosen = answer["text"].strip().splitlines()[0].strip() if answer["text"].strip() else ""
             chosen = ref_to_step(chosen, row["flow_name"])

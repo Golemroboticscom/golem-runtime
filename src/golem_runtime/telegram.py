@@ -100,10 +100,40 @@ class Telegram:
     def me(self) -> dict[str, Any]:
         return self.call("getMe", timeout=15)
 
+    LIMIT = 4000
+
+    @staticmethod
+    def fit(text: str, limit: int = 4000) -> str:
+        """Cut to length WITHOUT orphaning an HTML tag.
+
+        `text[:4000]` is not a safe cut: on 2026-09-01 it landed inside a gate's
+        `<blockquote>`, the closing tag went over the edge, and Telegram answered "can't
+        find end tag corresponding to start tag blockquote" -- four times, which killed a
+        live run at step 28. A truncation that produces an unsendable message is worse than
+        a short one, so anything still open when the knife falls is closed here.
+        """
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        open_tags: list[str] = []
+        for match in re.finditer(r"<(/?)([a-zA-Z]+)[^>]*>", cut):
+            closing, name = match.group(1), match.group(2).lower()
+            if closing:
+                if open_tags and open_tags[-1] == name:
+                    open_tags.pop()
+            else:
+                open_tags.append(name)
+        tail = "".join(f"</{name}>" for name in reversed(open_tags))
+        # A tag cannot be half-written either: drop a trailing "<b" with no ">".
+        last_open = cut.rfind("<")
+        if last_open > cut.rfind(">"):
+            cut = cut[:last_open]
+        return cut + tail
+
     def send(self, text: str, buttons: list[list[dict[str, str]]] | None = None) -> dict[str, Any]:
         params: dict[str, Any] = {
             "chat_id": self.chat_id,
-            "text": text[:4000],
+            "text": self.fit(text, self.LIMIT),
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }

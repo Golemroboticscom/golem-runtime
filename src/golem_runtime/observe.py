@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 from typing import Any, Iterator
 
 from .paths import SECRETS_DIR
@@ -90,19 +91,23 @@ def tool_span(*, run_id: str, step: str, actor: str, tool: str, arguments: dict[
     except Exception:
         yield slot
         return
+    # Yields exactly once on every path -- see the note in `llm_span`.
     try:
-        with trace(name=f"{tool} · {actor} · step {step}", run_type="tool",
-                   inputs={"tool": tool, "arguments": arguments},
-                   metadata={"golem_run_id": run_id, "golem_step": step, "golem_actor": actor,
-                             "golem_tool": tool}) as run:
-            try:
-                yield slot
-            finally:
-                run.end(outputs=slot or {"result": "no result recorded"})
+        span = trace(name=f"{tool} · {actor} · step {step}", run_type="tool",
+                     inputs={"tool": tool, "arguments": arguments},
+                     metadata={"golem_run_id": run_id, "golem_step": step, "golem_actor": actor,
+                               "golem_tool": tool})
+        run = span.__enter__()
     except Exception:
-        if slot:
-            return
         yield slot
+        return
+    try:
+        yield slot
+    finally:
+        with contextlib.suppress(Exception):
+            run.end(outputs=slot or {"result": "no result recorded"})
+        with contextlib.suppress(Exception):
+            span.__exit__(*sys.exc_info())
 
 
 @contextlib.contextmanager
@@ -122,21 +127,28 @@ def gate_span(*, run_id: str, step: str, actor: str, question: str, deliverable_
     except Exception:
         yield slot
         return
+    # Yields exactly once on every path. A GATE is where this mattered most: LangGraph
+    # suspends a gate by RAISING out of the node, so the exception is thrown into this
+    # generator every single time a gate is asked and not yet answered. The old shape
+    # yielded a second time and killed the run (2026-09-01, step 28 of a live 25-step run).
     try:
-        with trace(name=f"GATE {step} · asked {actor}", run_type="chain",
-                   inputs={"question": question, "submitted_by": deliverable_actor,
-                           "deliverable_from_step": deliverable_step},
-                   metadata={"golem_run_id": run_id, "golem_step": step, "golem_gate": True,
-                             "golem_actor": actor}) as run:
-            try:
-                yield slot
-            finally:
-                run.end(outputs=slot or {"decision": "unanswered"})
-                _score(run, slot)
+        span = trace(name=f"GATE {step} · asked {actor}", run_type="chain",
+                     inputs={"question": question, "submitted_by": deliverable_actor,
+                             "deliverable_from_step": deliverable_step},
+                     metadata={"golem_run_id": run_id, "golem_step": step, "golem_gate": True,
+                               "golem_actor": actor})
+        run = span.__enter__()
     except Exception:
-        if slot:
-            return
         yield slot
+        return
+    try:
+        yield slot
+    finally:
+        with contextlib.suppress(Exception):
+            run.end(outputs=slot or {"decision": "unanswered"})
+            _score(run, slot)
+        with contextlib.suppress(Exception):
+            span.__exit__(*sys.exc_info())
 
 
 def _score(run: Any, answer: dict[str, Any]) -> None:
@@ -200,25 +212,35 @@ def llm_span(*, run_id: str, step: str, actor: str, purpose: str, provider: str,
         "golem_purpose": purpose,
         "golem_tools_offered": tools or [],
     }
+    # THIS GENERATOR MUST YIELD EXACTLY ONCE, ON EVERY PATH.
+    #
+    # It used to be wrapped in a `try/except Exception` that yielded a SECOND time when the
+    # first yield had raised. A contextmanager that yields again after an exception was
+    # thrown into it dies with "generator didn't stop after throw()" -- and on 2026-09-01
+    # that killed a live 25-step run at a gate and put its own error where the real one
+    # should have been. Watching a run must never break it, and it must never hide it
+    # either. So: entering and ending the span are guarded; the BODY is not.
     try:
-        with trace(name=f"{actor} · step {step} · {provider}/{model}", run_type="llm",
-                   inputs={"messages": messages}, metadata=metadata) as run:
-            try:
-                yield slot
-            finally:
-                usage = slot.get("usage") or {}
-                run.end(
-                    outputs={
-                        "choices": [{"message": {"role": "assistant", "content": slot.get("text", "")}}],
-                        "usage_metadata": {
-                            "input_tokens": usage.get("input_tokens", 0),
-                            "output_tokens": usage.get("output_tokens", 0),
-                            "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-                        },
-                    }
-                )
+        span = trace(name=f"{actor} · step {step} · {provider}/{model}", run_type="llm",
+                     inputs={"messages": messages}, metadata=metadata)
+        run = span.__enter__()
     except Exception:
-        # Already yielded? Then the body ran and only the reporting failed -- say nothing.
-        if slot:
-            return
         yield slot
+        return
+    try:
+        yield slot
+    finally:
+        usage = slot.get("usage") or {}
+        with contextlib.suppress(Exception):
+            run.end(
+                outputs={
+                    "choices": [{"message": {"role": "assistant", "content": slot.get("text", "")}}],
+                    "usage_metadata": {
+                        "input_tokens": usage.get("input_tokens", 0),
+                        "output_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+                    },
+                }
+            )
+        with contextlib.suppress(Exception):
+            span.__exit__(*sys.exc_info())

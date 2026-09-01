@@ -1,0 +1,20 @@
+# The CAD image: what `golem-runtime-cad:phase-a` on the Engineering rows actually is.
+#
+# Three agent rows -- Engineering Lead, Rendering, Simulation -- already declare this image
+# by name in agents.csv. It had never been built, which is why a STEP file was the one
+# deliverable the flow could not produce (Yakov #6826).
+#
+# It is NOT a copy of the host's FreeCAD. The host has one, but it lives inside a conda
+# environment under /root -- unreadable to golem-runtime, and invisible inside a container
+# anyway, because Bash here runs through containers.run and sees only the mounts the agent's
+# row grants. So FreeCAD is installed INTO the image, from conda-forge, which is also how
+# the host's copy was installed.
+FROM docker.io/condaforge/miniforge3:latest
+
+RUN conda install -y -c conda-forge freecad python=3.11 \
+    && conda clean -afy
+
+ENV PYTHONPATH=/opt/runtime/src \
+    GOLEM_RUNTIME_ROOT=/opt/runtime \
+    PYTHONUNBUFFERED=1
+WORKDIR /opt/runtime
