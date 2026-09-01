@@ -708,3 +708,28 @@ def test_an_answer_must_be_a_reply_to_the_gate_itself():
 
     wrong = {**stray, "reply_to_message": {"message_id": 499}}
     assert channel._read_reply(wrong, request) is None
+
+
+def test_the_gate_shows_the_file_and_not_the_sentence_about_the_file(tmp_path):
+    """carrier-2 gate 13: a 6,148-byte register quoted as its own 126-char pointer (#6637)."""
+    from golem_runtime.gates import GateRequest, TelegramGate
+
+    written = tmp_path / "alternatives_rejected_step12.md"
+    written.write_text("# Rejected Alternatives\n\n**Alternative C — Bogie-6**: 49 kg of 50.\n", encoding="utf-8")
+
+    channel = TelegramGate.__new__(TelegramGate)
+    channel.EXCERPT = 3200
+    request = GateRequest(
+        "carrier-2", "13", "human-gate", "Yakov",
+        deliverable="I have written the register to alternatives_rejected_step12.md",
+        deliverable_step="12", deliverable_actor="Engineering Lead",
+        deliverable_files=[str(written)],
+    )
+    text = channel._question(request)
+    assert "Bogie-6" in text, "the gate must show the work, not the sentence about the work"
+    assert "126 chars" not in text
+    assert "6,148 bytes" not in text and "bytes" in text
+
+    # With no file, the answer itself is still the deliverable.
+    request.deliverable_files = []
+    assert "written the register" in channel._question(request)

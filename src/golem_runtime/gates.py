@@ -192,24 +192,41 @@ class TelegramGate:
             return None  # a question is answered in words, not with a button
         return [[{"text": _label(d), "callback_data": f"g|{request.step}|{d}"[:64]} for d in sorted(request.decisions)]]
 
+    def _reading_copy(self, request: GateRequest) -> tuple[str, str]:
+        """WHAT THE GATE SHOWS IS THE WORK, not the sentence the agent said about it.
+
+        Measured on run carrier-2, gate 13: the step wrote a 6,148-byte register and then
+        answered "I have written it to alternatives_rejected_step12.md" -- 126 characters.
+        The gate quoted the 126 characters and headed them "126 chars", so what Yakov read
+        was an empty gate over a full file, and he rejected it. The file was attached the
+        whole time. A pointer is not a deliverable; the FILE is (#6637).
+        """
+        for name in request.deliverable_files:
+            produced = Path(name)
+            try:
+                if produced.is_file() and produced.stat().st_size:
+                    return produced.read_text(encoding="utf-8", errors="replace"), f"{produced.name} · {produced.stat().st_size:,} bytes"
+            except OSError:
+                continue
+        return request.deliverable, f"{len(request.deliverable):,} chars"
+
     def _question(self, request: GateRequest) -> str:
         """Three parts, in reading order: what happened, the deliverable, the question."""
         lines: list[str] = []
+        body, size = self._reading_copy(request)
 
         # 1. what happened
         if request.deliverable_actor:
-            size = (f"{len(request.deliverable_files)} file(s)" if request.deliverable_files
-                    else f"{len(request.deliverable):,} chars")
             lines += [f"👤 <b>{html.escape(request.deliverable_actor)}</b> finished step "
                       f"{request.deliverable_step} · {size}", ""]
 
         # 2. the deliverable, as a reading copy
-        if request.deliverable:
-            lines += ["<blockquote expandable>" + as_telegram_html(request.deliverable[: self.EXCERPT]) + "</blockquote>"]
-            if len(request.deliverable) > self.EXCERPT:
+        if body:
+            lines += ["<blockquote expandable>" + as_telegram_html(body[: self.EXCERPT]) + "</blockquote>"]
+            if len(body) > self.EXCERPT:
                 lines.append("<i>…cut here. The whole thing is attached above.</i>")
             lines.append("")
-        elif not request.deliverable_files:
+        else:
             lines += ["<i>(the step produced nothing)</i>", ""]
 
         # 3. the question, last and short
