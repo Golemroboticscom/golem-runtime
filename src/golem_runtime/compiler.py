@@ -155,6 +155,20 @@ def _routing_prompt(row: dict[str, str], allowed: list[str]) -> str:
 
 
 def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate_context: dict[str, Any] | None = None) -> StateGraph:
+    def _files_of(step: str) -> list[str]:
+        """Which files that step wrote, read back out of the effect log."""
+        import json as _json
+        import sqlite3 as _sqlite3
+
+        try:
+            with _sqlite3.connect(effects.path) as db:
+                rows_ = db.execute(
+                    "SELECT payload FROM effects WHERE step=? ORDER BY rowid DESC LIMIT 1", (step,)
+                ).fetchone()
+            return list(_json.loads(rows_[0]).get("files") or []) if rows_ else []
+        except Exception:
+            return []
+
     rows = tables.flow(flow_name)
     by_step = {row["step"]: row for row in rows}
     exits = {
@@ -262,6 +276,9 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 # WHO submitted it. A gate that does not name the submitting agent asks
                 # Yakov to judge work with no author on it (#6600).
                 "deliverable_actor": next((r["actor"] for r in rows if r["step"] == previous), ""),
+                # The files that step actually wrote. These are the deliverable; the answer
+                # text is only the covering note.
+                "deliverable_files": _files_of(previous),
             }
             while True:
                 try:
@@ -314,6 +331,7 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 "model": answer["model"],
                 "turns": answer.get("turns", 1),
                 "tool_calls": answer.get("tool_calls", []),
+                "files": [c["wrote"] for c in answer.get("tool_calls", []) if c.get("wrote")],
             }
             if kind == "outbound-send":
                 engine.sink.emit(

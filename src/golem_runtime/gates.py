@@ -41,6 +41,7 @@ class GateRequest:
     deliverable: str = ""
     deliverable_step: str = ""
     deliverable_actor: str = ""
+    deliverable_files: list[str] = field(default_factory=list)
     context: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -118,9 +119,20 @@ class TelegramGate:
         token = f"{request.run_id}|{request.step}"
         # The whole deliverable travels as a file when it does not fit in a message. A gate
         # that shows only a headline is a gate that asks for a signature on an unread page.
-        # The RAW text always travels as a file, whatever its length. The message is a
-        # preview; the file is the thing itself, unformatted and uncut.
-        if request.deliverable:
+        # THE FILES THE STEP WROTE are the deliverable. The answer text is a covering note,
+        # and when the agent writes a file that note is just a pointer -- attaching it sent
+        # Yakov 108 bytes containing a link while 15 KB of research sat on disk (#6628).
+        sent = 0
+        for name in request.deliverable_files[:5]:
+            produced = Path(name)
+            if produced.is_file() and produced.stat().st_size:
+                self.telegram.send_document(
+                    produced,
+                    f"Gate {request.step} · {produced.name} · {produced.stat().st_size:,} bytes "
+                    f"· written by {request.deliverable_actor or 'unknown'} at step {request.deliverable_step}",
+                )
+                sent += 1
+        if not sent and request.deliverable:
             import tempfile
 
             with tempfile.TemporaryDirectory() as tmp:
@@ -128,8 +140,7 @@ class TelegramGate:
                 document.write_text(request.deliverable, encoding="utf-8")
                 self.telegram.send_document(
                     document,
-                    f"Gate {request.step} · raw deliverable of step {request.deliverable_step} "
-                    f"· submitted by {request.deliverable_actor or 'unknown'}",
+                    f"Gate {request.step} · the step wrote no file; this is its answer in full",
                 )
         buttons = [[{"text": _label(d), "callback_data": f"g|{request.step}|{d}"[:64]} for d in sorted(request.decisions)]]
         message = self.telegram.send(self._question(request), buttons)
@@ -176,7 +187,9 @@ class TelegramGate:
         if request.deliverable:
             lines += [
                 f"👤 <b>{html.escape(request.deliverable_actor or 'unknown')}</b>  ·  "
-                f"step {request.deliverable_step}  ·  {len(request.deliverable):,} chars",
+                f"step {request.deliverable_step}"
+                + (f"  ·  {len(request.deliverable_files)} file(s) attached"
+                   if request.deliverable_files else f"  ·  {len(request.deliverable):,} chars"),
                 "",
                 # Rendered, not dumped: the markdown becomes real bold and real bullets.
                 # The attached file above is still the untouched raw text.

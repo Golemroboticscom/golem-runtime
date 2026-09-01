@@ -246,6 +246,12 @@ class EngineWrapper:
                     "elapsed_ms": int((time.time() - started) * 1000),
                     "turn": turn,
                 }
+                # The path a Write actually produced. Without it a gate can only attach the
+                # agent's ANSWER, and when the agent writes a file its answer is a pointer --
+                # which is how Yakov received a 108-byte attachment holding a link while the
+                # 15 KB of research sat on disk (#6628).
+                if isinstance(result, dict) and result.get("written"):
+                    record["wrote"] = result["written"]
                 performed.append(record)
                 self.sink.emit("tool_call", run_id=run_id, step=step, actor=actor, **record)
                 conversation.append({

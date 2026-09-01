@@ -145,6 +145,7 @@ class Run:
                 deliverable=payload.get("deliverable", ""),
                 deliverable_step=payload.get("deliverable_step", ""),
                 deliverable_actor=payload.get("deliverable_actor", ""),
+                deliverable_files=list(payload.get("deliverable_files") or []),
             )
             self.sink.emit("gate_asked", step=request.step, kind=request.kind, actor=request.actor,
                            retry=bool(request.error), deliverable_step=request.deliverable_step,
