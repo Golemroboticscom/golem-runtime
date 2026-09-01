@@ -242,7 +242,35 @@ def _svc_image_search(creds: dict[str, str], query: str, count: int = 8) -> dict
     ]}
 
 
+def _svc_transcribe(creds: dict[str, str], audio_base64: str, filename: str = "voice.ogg") -> dict[str, Any]:
+    """Speech to text, ElevenLabs Scribe. The gate's own ears.
+
+    The Interface bridge already transcribes -- but it is a DIFFERENT BOT, so a voice note
+    replying to a gate never reaches it. The gate therefore needs its own path, and this is
+    it: the key stays with the holder, the audio travels, the text comes back (#6631).
+    """
+    boundary = "----golem-runtime-stt"
+    audio = base64.b64decode(audio_base64)
+    parts: list[bytes] = []
+    for key, value in (("model_id", "scribe_v1"),):
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode())
+    parts.append(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+        f"Content-Type: audio/ogg\r\n\r\n".encode())
+    parts.append(audio)
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+    request = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/speech-to-text",
+        data=b"".join(parts),
+        headers={"xi-api-key": creds["api_key"], "Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(request, timeout=180) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return {"text": (data.get("text") or "").strip(), "language": data.get("language_code")}
+
+
 SERVICES = {
+    "transcribe": ("elevenlabs", _svc_transcribe),
     "image_search": (None, _svc_image_search),
     "youtube_search": ("google_api", _svc_youtube_search),
     "translate": ("google_api", _svc_translate),

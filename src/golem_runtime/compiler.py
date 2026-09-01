@@ -279,6 +279,8 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 # The files that step actually wrote. These are the deliverable; the answer
                 # text is only the covering note.
                 "deliverable_files": _files_of(previous),
+                # The SHAPE of the ask, from the flow row. A table, not code (#6620).
+                "must_answer": row.get("must_answer", ""),
             }
             while True:
                 try:

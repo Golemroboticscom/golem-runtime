@@ -599,10 +599,12 @@ def test_the_gate_question_shows_the_deliverable_and_says_so_when_truncated():
                         deliverable="mass budget: 50 kg", deliverable_step="3")
     short.deliverable_actor = "Interface"
     text = channel._question(short)
-    assert "Approve the mission spec" in text
-    assert "mass budget: 50 kg" in text
-    assert "step 3" in text
+    # The three parts, in reading order: who finished what, the deliverable, then the ask.
     assert "<b>Interface</b>" in text, "the submitting agent must be named, and in bold"
+    assert "step 3" in text
+    assert "mass budget: 50 kg" in text
+    assert "Approve the mission spec" in text
+    assert text.index("Interface") < text.index("mass budget") < text.index("Approve the mission spec")
 
     # An expandable blockquote, never <pre>: Telegram's code block is translucent and the
     # chat wallpaper bleeds through it as a white band (#6605).
@@ -634,3 +636,75 @@ def test_the_deliverable_is_rendered_not_dumped():
 
     # And anything that looks like a tag is escaped before any of this runs.
     assert "&lt;script&gt;" in as_telegram_html("<script>")
+
+
+# ------------------------------------------------------------------ the gate's shapes
+
+
+def test_the_shape_of_the_ask_comes_from_the_table():
+    """A gate is not only approve-or-decline (#6620). The shape is a table value."""
+    from golem_runtime.gates import parse_shape
+
+    assert parse_shape("") == ("approve", [], "")
+    assert parse_shape("choose: tracked | wheeled | legged") == ("choose", ["tracked", "wheeled", "legged"], "")
+    assert parse_shape("ask: what payload height?") == ("ask", [], "what payload height?")
+    assert parse_shape("choose:") == ("approve", [], ""), "a choose with no options is not a choice"
+
+
+def test_choose_offers_one_button_per_option_and_records_which():
+    from golem_runtime.gates import GateRequest, TelegramGate
+
+    class Mute:
+        chat_id = "1"
+
+        def answer_callback(self, callback_id, text):
+            pass
+
+    channel = TelegramGate.__new__(TelegramGate)
+    channel.telegram = Mute()
+    request = GateRequest("r", "9", "human-gate", "Yakov", shape="choose", options=["tracked", "wheeled"])
+
+    buttons = channel._buttons(request)
+    assert len(buttons) == 3, "one row per option, plus reject"
+    assert "pick|0" in buttons[0][0]["callback_data"]
+
+    answered = channel._read_button({"id": "1", "data": "g|9|pick|1", "from": {"username": "Ja_Jake"}}, request)
+    assert answered["decision"] == "approve" and answered["chose"] == "wheeled"
+
+
+def test_an_open_question_takes_words_and_offers_no_button():
+    from golem_runtime.gates import GateRequest, TelegramGate
+
+    channel = TelegramGate.__new__(TelegramGate)
+    request = GateRequest("r", "9", "human-gate", "Yakov", shape="ask", question="what payload height?")
+    assert channel._buttons(request) is None
+    text = channel._question(request)
+    assert "what payload height?" in text
+    assert "Reply to THIS message" in text
+
+    said = channel._interpret("about 30 centimetres", "Ja_Jake", "p", "he", request)
+    assert said["decision"] == "approve" and said["said"] == "about 30 centimetres"
+    assert channel._interpret("לא", "Ja_Jake", "p", "he", request)["decision"] == "reject"
+
+
+def test_an_answer_must_be_a_reply_to_the_gate_itself():
+    """Without the anchor, any sentence in the group could be read as a decision."""
+    from golem_runtime.gates import GateRequest, TelegramGate
+
+    channel = TelegramGate.__new__(TelegramGate)
+
+    class Mute:
+        chat_id = "-100"
+
+    channel.telegram = Mute()
+    channel.message_id = 500
+    request = GateRequest("r", "4", "human-gate", "Yakov")
+
+    stray = {"chat": {"id": -100}, "text": "approve", "from": {"username": "Ja_Jake"}, "message_id": 9}
+    assert channel._read_reply(stray, request) is None, "a loose message is not an answer"
+
+    anchored = {**stray, "reply_to_message": {"message_id": 500}}
+    assert channel._read_reply(anchored, request)["decision"] == "approve"
+
+    wrong = {**stray, "reply_to_message": {"message_id": 499}}
+    assert channel._read_reply(wrong, request) is None

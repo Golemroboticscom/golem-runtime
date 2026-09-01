@@ -1,22 +1,38 @@
 """The gates: where the graph stops and a human decides.
 
 Ruling 2: a gate stops the graph, the question goes to the chat, and the reply resumes the
-run carrying the decision, the actor and the message id as provenance. The design-robot
-flow has twelve human gates and two external waits (ruling 17), so this is load-bearing
-from the first real run rather than an extra bolted on later.
+run carrying the decision, the actor and the message id as provenance.
 
-A gate channel is an interface with two implementations: `AutoGate` for the suite and dry
-runs, `TelegramGate` for real work. The graph knows neither.
+**A gate is not only approve-or-decline (Yakov #6620).** It has a SHAPE, and the shape is
+read from the flow row's `must_answer` column -- a table, not code:
+
+    (empty)                     approve   two buttons, as before
+    choose: tracked | wheeled   choose    one button per option
+    ask: what payload height?   ask       a real question, answered in words
+
+And the message carries three separate things, in the order a person reads them:
+
+    1. what happened   one line: who submitted, which step, how big
+    2. the deliverable the files the step wrote, attached
+    3. the question    short, and last, because it is what needs an answer
+
+**An answer arrives three ways, and all three are anchored.** A button press carries the
+gate in its callback data. A typed reply and a VOICE NOTE both have to be a Telegram reply
+TO the gate's own message -- otherwise any chatter in the group could be read as a
+decision. A voice note is transcribed by the runtime's own bridge, because the Interface
+bridge is a different bot and never sees a reply addressed to this one (#6631).
 """
 from __future__ import annotations
 
+import base64
+import html
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from . import tables
-from .telegram import Telegram
+from .telegram import Telegram, as_telegram_html
 
 HUMAN_DECISIONS = {"approve", "reject"}
 EXTERNAL_DECISIONS = {"received", "cancel"}
@@ -25,6 +41,21 @@ DECISIONS_BY_KIND = {"human-gate": HUMAN_DECISIONS, "wait-external": EXTERNAL_DE
 
 class GateTimeout(RuntimeError):
     """Nobody answered inside `gate_timeout_minutes`. The run stays paused on disk."""
+
+
+def parse_shape(must_answer: str) -> tuple[str, list[str], str]:
+    """`must_answer` -> (shape, options, question). Empty means a plain approval."""
+    text = (must_answer or "").strip()
+    if not text:
+        return "approve", [], ""
+    head, _, rest = text.partition(":")
+    head = head.strip().lower()
+    if head == "choose":
+        options = [o.strip() for o in rest.split("|") if o.strip()]
+        return ("choose", options, "") if options else ("approve", [], "")
+    if head in {"ask", "question"}:
+        return "ask", [], rest.strip()
+    return "approve", [], text
 
 
 @dataclass
@@ -36,13 +67,14 @@ class GateRequest:
     action: str = ""
     output: str = ""
     error: str = ""
-    # WHAT is being approved. A gate without it asks a human to decide about nothing --
-    # Yakov pressed approve on "Approve the mission spec" with no spec attached (#6598).
     deliverable: str = ""
     deliverable_step: str = ""
     deliverable_actor: str = ""
     deliverable_files: list[str] = field(default_factory=list)
-    context: dict[str, Any] = field(default_factory=dict)
+    # The shape of the ask, from the flow row's `must_answer` column.
+    shape: str = "approve"
+    options: list[str] = field(default_factory=list)
+    question: str = ""
 
     @property
     def decisions(self) -> set[str]:
@@ -50,7 +82,11 @@ class GateRequest:
 
 
 def validate_answer(value: Any, kind: str, run_id: str) -> dict[str, str]:
-    """An answer is only an answer if it says who decided and leaves a trail."""
+    """An answer is only an answer if it says who decided and leaves a trail.
+
+    A `choose` or an `ask` still resolves to one of the kind's decisions -- picking an
+    option or writing a sentence IS an approval, carrying what was chosen or said.
+    """
     if not isinstance(value, dict):
         raise ValueError("resume input must be an object")
     required = ("decision", "actor", "provenance")
@@ -62,8 +98,9 @@ def validate_answer(value: Any, kind: str, run_id: str) -> dict[str, str]:
         raise ValueError(f"invalid {kind} decision {decision!r}; expected one of {sorted(DECISIONS_BY_KIND[kind])}")
     answer = {k: value[k].strip() for k in required}
     answer["run_id"] = run_id
-    if value.get("note"):
-        answer["note"] = str(value["note"])[:500]
+    for extra in ("chose", "said", "heard_language"):
+        if value.get(extra):
+            answer[extra] = str(value[extra])[:2000]
     return answer
 
 
@@ -88,11 +125,16 @@ class AutoGate:
         self.asked.append(request)
         default = "approve" if request.kind == "human-gate" else "received"
         decision = self.decisions.get(request.step, default)
-        return validate_answer(
-            {"decision": decision, "actor": self.actor, "provenance": f"{self.provenance}:{request.step}"},
-            request.kind,
-            request.run_id,
-        )
+        value: dict[str, Any] = {
+            "decision": decision,
+            "actor": self.actor,
+            "provenance": f"{self.provenance}:{request.step}",
+        }
+        if request.shape == "choose" and request.options and decision == "approve":
+            value["chose"] = request.options[0]
+        if request.shape == "ask" and decision == "approve":
+            value["said"] = "auto-gate: no human was asked"
+        return validate_answer(value, request.kind, request.run_id)
 
     def announce(self, run_id: str, text: str) -> None:
         pass
@@ -103,7 +145,9 @@ def _label(decision: str) -> str:
 
 
 class TelegramGate:
-    """The real surface. One message per gate, two buttons, and the answer carries the id."""
+    """The real surface: what happened, the deliverable, then the question."""
+
+    EXCERPT = 3200
 
     def __init__(self, telegram: Telegram | None = None, poll_seconds: int | None = None, timeout_minutes: int | None = None):
         self.telegram = telegram or Telegram()
@@ -115,13 +159,10 @@ class TelegramGate:
     def announce(self, run_id: str, text: str) -> None:
         self.telegram.send(text)
 
-    def ask(self, request: GateRequest) -> dict[str, str]:
-        token = f"{request.run_id}|{request.step}"
-        # The whole deliverable travels as a file when it does not fit in a message. A gate
-        # that shows only a headline is a gate that asks for a signature on an unread page.
-        # THE FILES THE STEP WROTE are the deliverable. The answer text is a covering note,
-        # and when the agent writes a file that note is just a pointer -- attaching it sent
-        # Yakov 108 bytes containing a link while 15 KB of research sat on disk (#6628).
+    # ------------------------------------------------------------------ asking
+
+    def _attach(self, request: GateRequest) -> int:
+        """The files the step wrote ARE the deliverable; the answer text is a note."""
         sent = 0
         for name in request.deliverable_files[:5]:
             produced = Path(name)
@@ -138,118 +179,189 @@ class TelegramGate:
             with tempfile.TemporaryDirectory() as tmp:
                 document = Path(tmp) / f"step-{request.deliverable_step}-{(request.deliverable_actor or 'agent').replace(' ', '-')}.md"
                 document.write_text(request.deliverable, encoding="utf-8")
-                self.telegram.send_document(
-                    document,
-                    f"Gate {request.step} · the step wrote no file; this is its answer in full",
-                )
-        buttons = [[{"text": _label(d), "callback_data": f"g|{request.step}|{d}"[:64]} for d in sorted(request.decisions)]]
-        message = self.telegram.send(self._question(request), buttons)
-        message_id = message["message_id"]
+                self.telegram.send_document(document, f"Gate {request.step} · the step wrote no file; this is its answer in full")
+        return sent
+
+    def _buttons(self, request: GateRequest) -> list[list[dict[str, str]]] | None:
+        if request.shape == "choose" and request.options:
+            rows = [[{"text": f"{i + 1}. {o[:24]}", "callback_data": f"g|{request.step}|pick|{i}"[:64]}]
+                    for i, o in enumerate(request.options[:8])]
+            rows.append([{"text": _label("reject"), "callback_data": f"g|{request.step}|reject"[:64]}])
+            return rows
+        if request.shape == "ask":
+            return None  # a question is answered in words, not with a button
+        return [[{"text": _label(d), "callback_data": f"g|{request.step}|{d}"[:64]} for d in sorted(request.decisions)]]
+
+    def _question(self, request: GateRequest) -> str:
+        """Three parts, in reading order: what happened, the deliverable, the question."""
+        lines: list[str] = []
+
+        # 1. what happened
+        if request.deliverable_actor:
+            size = (f"{len(request.deliverable_files)} file(s)" if request.deliverable_files
+                    else f"{len(request.deliverable):,} chars")
+            lines += [f"👤 <b>{html.escape(request.deliverable_actor)}</b> finished step "
+                      f"{request.deliverable_step} · {size}", ""]
+
+        # 2. the deliverable, as a reading copy
+        if request.deliverable:
+            lines += ["<blockquote expandable>" + as_telegram_html(request.deliverable[: self.EXCERPT]) + "</blockquote>"]
+            if len(request.deliverable) > self.EXCERPT:
+                lines.append("<i>…cut here. The whole thing is attached above.</i>")
+            lines.append("")
+        elif not request.deliverable_files:
+            lines += ["<i>(the step produced nothing)</i>", ""]
+
+        # 3. the question, last and short
+        ask = request.question or request.action or f"Gate {request.step}"
+        lines.append(f"❓ <b>{html.escape(ask[:400])}</b>")
+        if request.shape == "choose" and request.options:
+            lines += [""] + [f"<b>{i + 1}.</b> {html.escape(o[:200])}" for i, o in enumerate(request.options[:8])]
+        elif request.shape == "ask":
+            lines.append("<i>Reply to THIS message — text or a voice note.</i>")
+        if request.error:
+            lines += ["", f"⚠ {html.escape(request.error)}"]
+        lines += ["", f"<code>gate {request.step} · {request.kind} · run {request.run_id}</code>"]
+        return "\n".join(lines)
+
+    def ask(self, request: GateRequest) -> dict[str, str]:
+        self._attach(request)
+        message = self.telegram.send(self._question(request), self._buttons(request))
+        self.message_id = message["message_id"]
         deadline = time.time() + self.timeout_minutes * 60
         while time.time() < deadline:
             try:
                 updates = self.telegram.updates(self.poll_seconds)
             except Exception:
-                # The gate waits. Nothing that happens to the network ends the run here.
                 time.sleep(5)
                 continue
             for update in updates:
                 answer = self._read(update, request)
                 if answer is None:
                     continue
-                # The button's spinner clears in `_read`, before this edit, because the edit is
-                # a second round trip and the spinner is what Yakov actually watches.
-                self.telegram.edit(message_id, self._question(request) + f"\n<b>{_label(answer['decision'])}</b> — {answer['actor']}")
+                closed = f"\n<b>{_label(answer['decision'])}</b> — {answer['actor']}"
+                if answer.get("chose"):
+                    closed += f"\n<b>chose:</b> {html.escape(answer['chose'][:200])}"
+                if answer.get("said"):
+                    closed += f"\n<b>said:</b> {html.escape(answer['said'][:400])}"
+                self.telegram.edit(self.message_id, self._question(request) + closed)
                 return answer
-        raise GateTimeout(f"gate {token} unanswered after {self.timeout_minutes} minutes; the run stays paused")
+        raise GateTimeout(f"gate {request.run_id}|{request.step} unanswered after {self.timeout_minutes} minutes; the run stays paused")
 
-    # An expandable quote holds far more than a code block did, and Telegram collapses it
-    # itself with a "show more", so a long deliverable stays readable instead of flooding.
-    EXCERPT = 3200
-
-    def _question(self, request: GateRequest) -> str:
-        """The question, with the RAW deliverable and the name of who submitted it.
-
-        Raw on purpose (#6600): no summary, no rewrite. What the agent produced is what
-        Yakov judges. Anything else puts a second author between them.
-        """
-        import html
-
-        from .telegram import as_telegram_html
-
-        # NOT <pre>. Telegram draws a code block with a TRANSLUCENT background, so the chat
-        # wallpaper shows through it as a bright band down the middle -- which is the white
-        # stripe Yakov photographed (#6605), and it appeared only in these messages because
-        # they were the only ones using a code block. An expandable blockquote is opaque,
-        # uses the normal proportional font, and collapses itself when long.
-        head = f"<b>{html.escape(request.action[:400])}</b>" if request.action else f"<b>Gate {request.step}</b>"
-        lines = [head, ""]
-        if request.deliverable:
-            lines += [
-                f"👤 <b>{html.escape(request.deliverable_actor or 'unknown')}</b>  ·  "
-                f"step {request.deliverable_step}"
-                + (f"  ·  {len(request.deliverable_files)} file(s) attached"
-                   if request.deliverable_files else f"  ·  {len(request.deliverable):,} chars"),
-                "",
-                # Rendered, not dumped: the markdown becomes real bold and real bullets.
-                # The attached file above is still the untouched raw text.
-                "<blockquote expandable>" + as_telegram_html(request.deliverable[: self.EXCERPT]) + "</blockquote>",
-            ]
-            if len(request.deliverable) > self.EXCERPT:
-                lines.append("<i>…cut here. The whole raw text is the file above.</i>")
-        else:
-            lines += ["<i>(no deliverable was produced before this gate)</i>"]
-        if request.error:
-            lines += ["", f"⚠ {html.escape(request.error)}"]
-        lines += ["", f"<code>gate {request.step} · {request.kind} · run {request.run_id}</code>"]
-        return "\n".join(lines)
+    # ------------------------------------------------------------------ reading
 
     def _read(self, update: dict[str, Any], request: GateRequest) -> dict[str, str] | None:
         query = update.get("callback_query")
         if query:
-            parts = str(query.get("data", "")).split("|")
-            matches = len(parts) == 3 and parts[0] == "g" and parts[1] == request.step
-            decision = parts[2] if len(parts) == 3 else ""
-            if not matches or decision not in request.decisions:
-                # A press that belongs to no open gate must SAY SO. Silence leaves the
-                # button spinning and the person believing they answered -- which is what
-                # happened on 2026-09-01 when Yakov pressed a layout sample I had sent with
-                # live-looking buttons, and nothing moved for forty minutes (#6610).
-                self.telegram.answer_callback(
-                    query["id"],
-                    f"That button is not the open gate. The live one is gate {request.step} of run {request.run_id}.",
+            return self._read_button(query, request)
+        return self._read_reply(update.get("message") or {}, request)
+
+    def _read_button(self, query: dict[str, Any], request: GateRequest) -> dict[str, str] | None:
+        parts = str(query.get("data", "")).split("|")
+        user = query.get("from", {})
+        actor = user.get("username") or user.get("first_name") or str(user.get("id", "unknown"))
+        provenance = f"telegram:callback:{query['id']}:message:{query.get('message', {}).get('message_id')}"
+
+        if len(parts) >= 3 and parts[0] == "g" and parts[1] == request.step:
+            if parts[2] == "pick" and request.shape == "choose":
+                index = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else -1
+                if 0 <= index < len(request.options):
+                    self.telegram.answer_callback(query["id"], f"chose: {request.options[index][:60]}")
+                    return validate_answer(
+                        {"decision": "approve", "actor": actor, "provenance": provenance, "chose": request.options[index]},
+                        request.kind, request.run_id,
+                    )
+            elif parts[2] in request.decisions:
+                self.telegram.answer_callback(query["id"], f"{request.step}: {parts[2]}")
+                return validate_answer(
+                    {"decision": parts[2], "actor": actor, "provenance": provenance}, request.kind, request.run_id
                 )
-                return None
-            user = query.get("from", {})
-            actor = user.get("username") or user.get("first_name") or str(user.get("id", "unknown"))
-            self.telegram.answer_callback(query["id"], f"{request.step}: {decision}")
-            return validate_answer(
-                {
-                    "decision": decision,
-                    "actor": actor,
-                    "provenance": f"telegram:callback:{query['id']}:message:{query.get('message', {}).get('message_id')}",
-                },
-                request.kind,
-                request.run_id,
-            )
-        message = update.get("message") or {}
-        text = str(message.get("text", "")).strip().lower()
-        if not text or str(message.get("chat", {}).get("id")) != self.telegram.chat_id:
+        # A press that belongs to no open gate must SAY SO. Silence leaves the button
+        # spinning and the person believing they answered (#6610).
+        self.telegram.answer_callback(
+            query["id"], f"That button is not the open gate. The live one is gate {request.step} of run {request.run_id}."
+        )
+        return None
+
+    def _read_reply(self, message: dict[str, Any], request: GateRequest) -> dict[str, str] | None:
+        """A typed or spoken answer, and it MUST be a reply to this gate's own message.
+
+        Without that anchor any sentence in the group could be read as a decision.
+        """
+        if str(message.get("chat", {}).get("id")) != self.telegram.chat_id:
             return None
-        word = text.split()[0]
-        synonyms = {
-            "approve": "approve", "ok": "approve", "yes": "approve", "אשר": "approve", "כן": "approve",
-            "reject": "reject", "no": "reject", "דחה": "reject", "לא": "reject",
-            "received": "received", "התקבל": "received",
-            "cancel": "cancel", "בטל": "cancel",
-        }
-        decision = synonyms.get(word)
-        if decision not in request.decisions:
+        replied = (message.get("reply_to_message") or {}).get("message_id")
+        if replied != getattr(self, "message_id", None):
             return None
+
         user = message.get("from", {})
         actor = user.get("username") or user.get("first_name") or str(user.get("id", "unknown"))
+        provenance = f"telegram:message:{message.get('message_id')}"
+        language = ""
+
+        text = str(message.get("text") or message.get("caption") or "").strip()
+        media = message.get("voice") or message.get("audio") or message.get("video_note")
+        if not text and media:
+            heard = self._transcribe(media)
+            if heard is None:
+                return None
+            text, language = heard
+            provenance += ":voice"
+        if not text:
+            return None
+
+        return self._interpret(text, actor, provenance, language, request)
+
+    def _transcribe(self, media: dict[str, Any]) -> tuple[str, str] | None:
+        """The gate's own ears. The Interface bridge is a different bot and never sees this."""
+        from .secrets_bridge import BridgeClient
+
+        try:
+            audio, filename = self.telegram.download(media["file_id"])
+            answer = BridgeClient().service(
+                "transcribe", {"audio_base64": base64.b64encode(audio).decode("ascii"), "filename": filename}
+            )
+        except Exception:
+            return None
+        if not answer.get("ok") or not answer.get("text"):
+            return None
+        return answer["text"].strip(), str(answer.get("language") or "")
+
+    def _interpret(self, text: str, actor: str, provenance: str, language: str, request: GateRequest) -> dict[str, str] | None:
+        """Turn what a person wrote or said into this gate's decision."""
+        lowered = text.strip().lower()
+        first = lowered.split()[0] if lowered.split() else ""
+        yes = {"approve", "ok", "okay", "yes", "אשר", "כן", "מאשר", "מאושר", "received", "התקבל"}
+        no = {"reject", "no", "דחה", "לא", "cancel", "בטל"}
+
+        if request.shape == "choose" and request.options:
+            if first.rstrip(".").isdigit():
+                index = int(first.rstrip(".")) - 1
+                if 0 <= index < len(request.options):
+                    return validate_answer(
+                        {"decision": "approve", "actor": actor, "provenance": provenance,
+                         "chose": request.options[index], "said": text, "heard_language": language},
+                        request.kind, request.run_id)
+            for option in request.options:
+                if option.lower() in lowered:
+                    return validate_answer(
+                        {"decision": "approve", "actor": actor, "provenance": provenance,
+                         "chose": option, "said": text, "heard_language": language},
+                        request.kind, request.run_id)
+
+        if request.shape == "ask":
+            # Anything said IS the answer; only an explicit refusal stops the run.
+            decision = "reject" if first in no else ("approve" if request.kind == "human-gate" else "received")
+            return validate_answer(
+                {"decision": decision, "actor": actor, "provenance": provenance, "said": text, "heard_language": language},
+                request.kind, request.run_id)
+
+        if first in yes:
+            decision = "approve" if request.kind == "human-gate" else "received"
+        elif first in no:
+            decision = "reject" if request.kind == "human-gate" else "cancel"
+        else:
+            return None
         return validate_answer(
-            {"decision": decision, "actor": actor, "provenance": f"telegram:message:{message.get('message_id')}"},
-            request.kind,
-            request.run_id,
-        )
+            {"decision": decision, "actor": actor, "provenance": provenance, "said": text, "heard_language": language},
+            request.kind, request.run_id)

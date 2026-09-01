@@ -19,7 +19,7 @@ from . import store, tables
 from .compiler import RunState, compile_flow
 from .effects import EffectLog
 from .engine import EngineWrapper
-from .gates import AutoGate, GateChannel, GateRequest
+from .gates import AutoGate, GateChannel, GateRequest, parse_shape
 from .paths import RUN_DIR, ensure_var_dirs
 from .records import RecordSink
 from .validate import validate_flow
@@ -147,11 +147,13 @@ class Run:
                 deliverable_actor=payload.get("deliverable_actor", ""),
                 deliverable_files=list(payload.get("deliverable_files") or []),
             )
+            request.shape, request.options, request.question = parse_shape(payload.get("must_answer", ""))
             self.sink.emit("gate_asked", step=request.step, kind=request.kind, actor=request.actor,
                            retry=bool(request.error), deliverable_step=request.deliverable_step,
                            deliverable_actor=request.deliverable_actor,
-                           deliverable_chars=len(request.deliverable))
+                           deliverable_chars=len(request.deliverable), shape=request.shape,
+                           options=len(request.options))
             answer = self.gate.ask(request)
-            self.sink.emit("gate_answered", step=request.step, kind=request.kind, **answer)
+            self.sink.emit("gate_answered", step=request.step, kind=request.kind, shape=request.shape, **answer)
             result = app.invoke(Command(resume=answer), self.config)
         return result

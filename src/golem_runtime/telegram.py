@@ -152,6 +152,15 @@ class Telegram:
     def answer_callback(self, callback_id: str, text: str) -> None:
         self.call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:180]})
 
+    def download(self, file_id: str) -> tuple[bytes, str]:
+        """Fetch a Telegram file's bytes. Used for a voice note answering a gate."""
+        answer = self.call("getFile", {"file_id": file_id}, timeout=30)
+        if not answer.get("ok"):
+            raise RuntimeError(f"telegram would not describe the file: {answer}")
+        path = answer["result"]["file_path"]
+        with urllib.request.urlopen(f"{API}/file/bot{self.token}/{path}", timeout=180) as response:
+            return response.read(), path.rsplit("/", 1)[-1]
+
     def updates(self, wait_seconds: int) -> list[dict[str, Any]]:
         # Only the two kinds a gate can be answered with. Anything else is noise that would
         # be fetched, ignored, and would still consume the offset.
