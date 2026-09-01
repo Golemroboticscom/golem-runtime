@@ -29,11 +29,18 @@ def thread_id(run_id: str) -> str:
     return f"{run_id}-{hashlib.sha256(run_id.encode()).hexdigest()[:12]}"
 
 
-def run_config(run_id: str) -> dict[str, Any]:
-    """The step ceiling is not decoration: it is the backstop above every loop_ceiling."""
+def run_config(run_id: str, flow_name: str = "") -> dict[str, Any]:
+    """The step ceiling is not decoration: it is the backstop above every loop_ceiling.
+
+    The metadata is what makes the viewer readable rather than merely full: `thread_id`
+    groups all 48 steps of one product into ONE conversation instead of 48 unrelated
+    traces, and the tags become one-click filters.
+    """
     return {
         "configurable": {"thread_id": thread_id(run_id)},
         "recursion_limit": tables.control_int("run_step_ceiling", "runtime"),
+        "metadata": {"thread_id": run_id, "golem_run_id": run_id, "golem_flow": flow_name},
+        "tags": [t for t in ("golem-runtime", flow_name, run_id) if t],
     }
 
 
@@ -81,7 +88,7 @@ class Run:
         self.sink = RecordSink(run_id, record_dir)
         self.engine = EngineWrapper(self.sink, transport=transport)
         self.effects = EffectLog(effects_path)
-        self.config = run_config(run_id)
+        self.config = run_config(run_id, flow_name)
 
     def execute(self, params: dict[str, str] | None = None, resume: bool = False, **extra: Any) -> dict[str, Any]:
         validation = validate_flow(self.flow_name, params)
@@ -158,7 +165,12 @@ class Run:
                            deliverable_actor=request.deliverable_actor,
                            deliverable_chars=len(request.deliverable), shape=request.shape,
                            options=len(request.options))
-            answer = self.gate.ask(request)
+            with observe.gate_span(run_id=request.run_id, step=request.step, actor=request.actor,
+                                   question=request.question or request.action,
+                                   deliverable_actor=request.deliverable_actor,
+                                   deliverable_step=request.deliverable_step) as span:
+                answer = self.gate.ask(request)
+                span.update(answer)
             self.sink.emit("gate_answered", step=request.step, kind=request.kind, shape=request.shape, **answer)
             result = app.invoke(Command(resume=answer), self.config)
         return result

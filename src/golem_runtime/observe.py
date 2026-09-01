@@ -64,6 +64,80 @@ def enabled() -> bool:
     return configure() and os.environ.get("LANGSMITH_TRACING") == "true"
 
 
+def thread(run_id: str) -> dict[str, Any]:
+    """Everything one product's run does, as ONE conversation in the viewer.
+
+    Without a thread id LangSmith shows 48 unrelated traces and you have to reassemble
+    the story yourself. With it, the run is a single thread you read top to bottom.
+    """
+    return {"configurable": {"thread_id": run_id}} if enabled() else {}
+
+
+@contextlib.contextmanager
+def tool_span(*, run_id: str, step: str, actor: str, tool: str, arguments: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """What the agent DID, next to what it said.
+
+    Fifty tool calls in a run against thirty-eight model calls -- and until now only the
+    model calls were visible. A trace that shows the thinking and hides the writing is
+    half a trace.
+    """
+    slot: dict[str, Any] = {}
+    if not enabled():
+        yield slot
+        return
+    try:
+        from langsmith import trace
+    except Exception:
+        yield slot
+        return
+    try:
+        with trace(name=f"{tool} · {actor} · step {step}", run_type="tool",
+                   inputs={"tool": tool, "arguments": arguments},
+                   metadata={"golem_run_id": run_id, "golem_step": step, "golem_actor": actor,
+                             "golem_tool": tool}) as run:
+            try:
+                yield slot
+            finally:
+                run.end(outputs=slot or {"result": "no result recorded"})
+    except Exception:
+        if slot:
+            return
+        yield slot
+
+
+@contextlib.contextmanager
+def gate_span(*, run_id: str, step: str, actor: str, question: str, deliverable_actor: str,
+              deliverable_step: str) -> Iterator[dict[str, Any]]:
+    """The human stop: the question that went out, and the decision that came back.
+
+    A gate is the most important thing in a run and it was the only thing not recorded --
+    the viewer showed the work stopping and nothing about why or who restarted it.
+    """
+    slot: dict[str, Any] = {}
+    if not enabled():
+        yield slot
+        return
+    try:
+        from langsmith import trace
+    except Exception:
+        yield slot
+        return
+    try:
+        with trace(name=f"GATE {step} · asked {actor}", run_type="chain",
+                   inputs={"question": question, "submitted_by": deliverable_actor,
+                           "deliverable_from_step": deliverable_step},
+                   metadata={"golem_run_id": run_id, "golem_step": step, "golem_gate": True,
+                             "golem_actor": actor}) as run:
+            try:
+                yield slot
+            finally:
+                run.end(outputs=slot or {"decision": "unanswered"})
+    except Exception:
+        if slot:
+            return
+        yield slot
+
+
 @contextlib.contextmanager
 def llm_span(*, run_id: str, step: str, actor: str, purpose: str, provider: str, model: str,
              prompt: str, system: str | None, tools: list[str] | None) -> Iterator[dict[str, Any]]:

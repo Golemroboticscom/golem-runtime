@@ -250,7 +250,10 @@ class EngineWrapper:
                 except ValueError:
                     arguments = {}
                 started = time.time()
-                result = toolbox.run_tool(name, arguments, context)
+                with observe.tool_span(run_id=run_id, step=step, actor=actor, tool=name,
+                                       arguments={k: str(v)[:400] for k, v in arguments.items()}) as span:
+                    result = toolbox.run_tool(name, arguments, context)
+                    span.update({k: str(v)[:2000] for k, v in (result or {}).items()})
                 record = {
                     "tool": name,
                     "arguments": {k: str(v)[:200] for k, v in arguments.items()},
