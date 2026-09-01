@@ -132,10 +132,39 @@ def gate_span(*, run_id: str, step: str, actor: str, question: str, deliverable_
                 yield slot
             finally:
                 run.end(outputs=slot or {"decision": "unanswered"})
+                _score(run, slot)
     except Exception:
         if slot:
             return
         yield slot
+
+
+def _score(run: Any, answer: dict[str, Any]) -> None:
+    """Yakov's decision, recorded as a SCORE and not only as text.
+
+    A gate answer is the only human judgement the system ever receives, and as prose it can
+    only be read one run at a time. As a score it aggregates: which agents get rejected,
+    which steps, how often, and whether that is getting better. `approve` is 1, `reject` is
+    0, and what he chose or said rides along as the comment.
+
+    Silent on failure by design -- a scoring call must never be able to affect a gate.
+    """
+    decision = (answer or {}).get("decision")
+    if not decision:
+        return
+    try:
+        from langsmith import Client
+
+        Client().create_feedback(
+            run_id=run.id,
+            key="human-gate",
+            score=1.0 if decision in ("approve", "received") else 0.0,
+            value=decision,
+            comment=(answer.get("chose") or answer.get("said") or "")[:1000] or None,
+            source_info={"actor": answer.get("actor"), "provenance": answer.get("provenance")},
+        )
+    except Exception:
+        pass
 
 
 @contextlib.contextmanager

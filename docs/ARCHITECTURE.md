@@ -67,3 +67,21 @@ so explicitly.
 `_meta/function_map.csv` carries a `status` per function including `to_delete`. That is the
 mechanism that keeps a replacement honest: **a replacement names its victims in the same commit**,
 so the transition has a countable end instead of an implied one (GOL-385).
+
+
+---
+
+## The format is chosen per task, never by habit
+
+Yakov, #6784: *"we use the format that is right for the task. There is no obligation to CSV or
+JSON or any other format. The test is always: which format is the most correct one."*
+
+So a table is a table because rows and columns are what the thing IS -- one row per agent, one
+row per step, diffable line by line and openable in a spreadsheet. A credential file is JSON
+because it is nested and never hand-scanned. A record is JSONL because it is appended to while a
+run is in flight. None of these is a house style, and none of them is owed deference: if a
+different format fits a new thing better, that is the format it gets.
+
+Withdrawn on his instruction (#6782): the earlier remark calling our CSV specs "non-standard"
+against YAML. It was not a finding, it is not true as a criticism, and it is not carried
+anywhere.
