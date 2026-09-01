@@ -574,7 +574,7 @@ def test_the_gate_question_shows_the_deliverable_and_says_so_when_truncated():
     assert "Approve the mission spec" in text
     assert "mass budget: 50 kg" in text
     assert "step 3" in text
-    assert "Submitted by: Interface" in text
+    assert "<b>Interface</b>" in text, "the submitting agent must be named, and in bold"
 
     # An expandable blockquote, never <pre>: Telegram's code block is translucent and the
     # chat wallpaper bleeds through it as a white band (#6605).
