@@ -615,7 +615,7 @@ def test_the_gate_question_shows_the_deliverable_and_says_so_when_truncated():
     assert "cut here" in channel._question(long)
 
     empty = GateRequest("r", "4", "human-gate", "Yakov")
-    assert "no deliverable" in channel._question(empty)
+    assert "produced nothing" in channel._question(empty), "an empty gate must say so, not go quiet"
 
 
 def test_the_deliverable_is_rendered_not_dumped():
