@@ -576,8 +576,13 @@ def test_the_gate_question_shows_the_deliverable_and_says_so_when_truncated():
     assert "step 3" in text
     assert "Submitted by: Interface" in text
 
+    # An expandable blockquote, never <pre>: Telegram's code block is translucent and the
+    # chat wallpaper bleeds through it as a white band (#6605).
+    assert "<blockquote expandable>" in text
+    assert "<pre>" not in text
+
     long = GateRequest("r", "4", "human-gate", "Yakov", deliverable="x" * 9000, deliverable_step="3")
-    assert "truncated" in channel._question(long)
+    assert "cut here" in channel._question(long)
 
     empty = GateRequest("r", "4", "human-gate", "Yakov")
     assert "no deliverable" in channel._question(empty)

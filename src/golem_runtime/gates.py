@@ -148,11 +148,13 @@ class TelegramGate:
                     continue
                 # The button's spinner clears in `_read`, before this edit, because the edit is
                 # a second round trip and the spinner is what Yakov actually watches.
-                self.telegram.edit(message_id, self._question(request) + f"\n\n<b>{_label(answer['decision'])}</b> — {answer['actor']}")
+                self.telegram.edit(message_id, self._question(request) + f"\n<b>{_label(answer['decision'])}</b> — {answer['actor']}")
                 return answer
         raise GateTimeout(f"gate {token} unanswered after {self.timeout_minutes} minutes; the run stays paused")
 
-    EXCERPT = 2200  # what fits in a Telegram message alongside the question
+    # An expandable quote holds far more than a code block did, and Telegram collapses it
+    # itself with a "show more", so a long deliverable stays readable instead of flooding.
+    EXCERPT = 3200
 
     def _question(self, request: GateRequest) -> str:
         """The question, with the RAW deliverable and the name of who submitted it.
@@ -162,26 +164,27 @@ class TelegramGate:
         """
         import html
 
-        lines = [
-            f"<b>Gate {request.step}</b> — {request.kind}",
-            f"run <code>{request.run_id}</code>",
-        ]
-        if request.action:
-            lines += ["", f"<b>{html.escape(request.action[:400])}</b>"]
+        # NOT <pre>. Telegram draws a code block with a TRANSLUCENT background, so the chat
+        # wallpaper shows through it as a bright band down the middle -- which is the white
+        # stripe Yakov photographed (#6605), and it appeared only in these messages because
+        # they were the only ones using a code block. An expandable blockquote is opaque,
+        # uses the normal proportional font, and collapses itself when long.
+        head = f"<b>{html.escape(request.action[:400])}</b>" if request.action else f"<b>Gate {request.step}</b>"
+        lines = [head, ""]
         if request.deliverable:
             lines += [
+                f"👤 <b>{html.escape(request.deliverable_actor or 'unknown')}</b>  ·  "
+                f"step {request.deliverable_step}  ·  {len(request.deliverable):,} chars",
                 "",
-                f"<b>Submitted by: {html.escape(request.deliverable_actor or 'unknown')}</b> "
-                f"· step {request.deliverable_step} · {len(request.deliverable)} chars",
-                "",
-                "<pre>" + html.escape(request.deliverable[: self.EXCERPT]) + "</pre>",
+                "<blockquote expandable>" + html.escape(request.deliverable[: self.EXCERPT]) + "</blockquote>",
             ]
             if len(request.deliverable) > self.EXCERPT:
-                lines.append("<i>…truncated here. The whole raw text is the file above.</i>")
+                lines.append("<i>…cut here. The whole raw text is the file above.</i>")
         else:
-            lines += ["", "<i>(no deliverable was produced before this gate)</i>"]
+            lines += ["<i>(no deliverable was produced before this gate)</i>"]
         if request.error:
-            lines += ["", f"⚠ {request.error}"]
+            lines += ["", f"⚠ {html.escape(request.error)}"]
+        lines += ["", f"<code>gate {request.step} · {request.kind} · run {request.run_id}</code>"]
         return "\n".join(lines)
 
     def _read(self, update: dict[str, Any], request: GateRequest) -> dict[str, str] | None:
