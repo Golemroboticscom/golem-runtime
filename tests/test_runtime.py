@@ -563,6 +563,34 @@ def test_a_gate_carries_the_deliverable_it_is_asking_about(tmp_path):
     assert first.actor == "Yakov"
 
 
+def test_a_press_that_belongs_to_no_open_gate_is_answered_out_loud():
+    """Silence on a stray press leaves the button spinning and the person thinking they
+    answered. Yakov pressed a layout sample with live-looking buttons and waited forty
+    minutes (#6610)."""
+    from golem_runtime.gates import GateRequest, TelegramGate
+
+    answered = []
+
+    class Mute:
+        chat_id = "1"
+
+        def answer_callback(self, callback_id, text):
+            answered.append(text)
+
+    channel = TelegramGate.__new__(TelegramGate)
+    channel.telegram = Mute()
+    request = GateRequest("carrier-2", "4", "human-gate", "Yakov")
+
+    assert channel._read({"callback_query": {"id": "1", "data": "demo|x|a", "from": {}}}, request) is None
+    assert channel._read({"callback_query": {"id": "2", "data": "g|9|approve", "from": {}}}, request) is None
+    assert len(answered) == 2, "both strays must be told, not ignored"
+    assert "gate 4" in answered[0] and "carrier-2" in answered[0]
+
+    # The real one still passes, and is not answered with a refusal.
+    real = channel._read({"callback_query": {"id": "3", "data": "g|4|approve", "from": {"username": "Ja_Jake"}}}, request)
+    assert real is None or real["decision"] == "approve"
+
+
 def test_the_gate_question_shows_the_deliverable_and_says_so_when_truncated():
     from golem_runtime.gates import GateRequest, TelegramGate
 

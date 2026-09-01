@@ -191,10 +191,17 @@ class TelegramGate:
         query = update.get("callback_query")
         if query:
             parts = str(query.get("data", "")).split("|")
-            if len(parts) != 3 or parts[0] != "g" or parts[1] != request.step:
-                return None
-            decision = parts[2]
-            if decision not in request.decisions:
+            matches = len(parts) == 3 and parts[0] == "g" and parts[1] == request.step
+            decision = parts[2] if len(parts) == 3 else ""
+            if not matches or decision not in request.decisions:
+                # A press that belongs to no open gate must SAY SO. Silence leaves the
+                # button spinning and the person believing they answered -- which is what
+                # happened on 2026-09-01 when Yakov pressed a layout sample I had sent with
+                # live-looking buttons, and nothing moved for forty minutes (#6610).
+                self.telegram.answer_callback(
+                    query["id"],
+                    f"That button is not the open gate. The live one is gate {request.step} of run {request.run_id}.",
+                )
                 return None
             user = query.get("from", {})
             actor = user.get("username") or user.get("first_name") or str(user.get("id", "unknown"))
