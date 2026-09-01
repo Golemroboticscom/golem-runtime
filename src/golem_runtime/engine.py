@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import tables
+from . import observe, tables
 from .records import RecordSink
 from .secrets_bridge import BridgeClient
 
@@ -128,11 +128,24 @@ class EngineWrapper:
         attempts: list[dict[str, Any]] = []
         for index, route in enumerate(routes):
             started = time.time()
-            try:
-                result = self._perform(route, prompt, system, tool_declarations, image)
-                error = None
-            except Exception as exc:
-                result, error = None, f"{type(exc).__name__}: {exc}"
+            # The span is the ONLY instrumentation in the system. Our calls never pass
+            # through LangChain, so nothing would report them otherwise; and the iron rule
+            # -- this wrapper is the one way to reach a model -- guarantees one place is
+            # enough, for ever. If tracing is off it costs a function call (#6739).
+            with observe.llm_span(
+                run_id=run_id, step=step, actor=actor, purpose=purpose,
+                provider=route.provider, model=route.model,
+                prompt=_as_text(prompt), system=system,
+                tools=[t.get("name") or t.get("type") for t in (tool_declarations or [])],
+            ) as span:
+                try:
+                    result = self._perform(route, prompt, system, tool_declarations, image)
+                    error = None
+                    span["text"] = result.get("text", "")
+                    span["usage"] = result.get("usage") or {}
+                except Exception as exc:
+                    result, error = None, f"{type(exc).__name__}: {exc}"
+                    span["text"] = f"[route failed] {error}"
             elapsed_ms = int((time.time() - started) * 1000)
             attempt = {
                 "attempt": index + 1,

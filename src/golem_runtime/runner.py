@@ -15,7 +15,7 @@ from typing import Any
 
 from langgraph.types import Command
 
-from . import store, tables
+from . import observe, store, tables
 from .compiler import RunState, compile_flow
 from .effects import EffectLog
 from .engine import EngineWrapper
@@ -85,8 +85,13 @@ class Run:
 
     def execute(self, params: dict[str, str] | None = None, resume: bool = False, **extra: Any) -> dict[str, Any]:
         validation = validate_flow(self.flow_name, params)
+        # Turning tracing on here, not at import, means a run either reports itself entirely
+        # or not at all -- never half. The graph's own nodes come free once this is set,
+        # because LangGraph is a langchain-core runnable; only our model calls need the span.
+        traced = observe.configure()
         self.sink.emit(
             "run_start",
+            traced=traced,
             flow=self.flow_name,
             transport=self.transport,
             state_store=self.state_store,
