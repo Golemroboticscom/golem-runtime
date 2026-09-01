@@ -90,6 +90,33 @@ class Telegram:
             time.sleep(2 * (attempt + 1))
         raise RuntimeError(f"telegram refused the send four times: {answer}")
 
+    def send_document(self, path: Path, caption: str = "") -> dict[str, Any] | None:
+        """Send a file. Used when a gate's deliverable is too long to read in a message."""
+        path = Path(path)
+        boundary = "----golem-runtime-boundary"
+        parts: list[bytes] = []
+        for key, value in (("chat_id", self.chat_id), ("caption", caption[:1000])):
+            parts.append(
+                f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{value}\r\n".encode("utf-8")
+            )
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; "
+            f"filename=\"{path.name}\"\r\nContent-Type: text/markdown\r\n\r\n".encode("utf-8")
+        )
+        parts.append(path.read_bytes())
+        parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+        body = b"".join(parts)
+        request = urllib.request.Request(
+            f"{API}/bot{self.token}/sendDocument",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception:
+            return None
+
     def edit(self, message_id: int, text: str) -> None:
         self.call(
             "editMessageText",

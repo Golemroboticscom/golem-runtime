@@ -142,8 +142,14 @@ class Run:
                 action=payload.get("action", ""),
                 output=payload.get("output", ""),
                 error=payload.get("error", ""),
+                deliverable=payload.get("deliverable", ""),
+                deliverable_step=payload.get("deliverable_step", ""),
+                deliverable_actor=payload.get("deliverable_actor", ""),
             )
-            self.sink.emit("gate_asked", step=request.step, kind=request.kind, actor=request.actor, retry=bool(request.error))
+            self.sink.emit("gate_asked", step=request.step, kind=request.kind, actor=request.actor,
+                           retry=bool(request.error), deliverable_step=request.deliverable_step,
+                           deliverable_actor=request.deliverable_actor,
+                           deliverable_chars=len(request.deliverable))
             answer = self.gate.ask(request)
             self.sink.emit("gate_answered", step=request.step, kind=request.kind, **answer)
             result = app.invoke(Command(resume=answer), self.config)

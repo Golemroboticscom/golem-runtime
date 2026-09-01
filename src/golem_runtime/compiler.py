@@ -245,6 +245,9 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
 
         def _ask(state: RunState, row: dict[str, str], kind: str) -> dict[str, str]:
             """Stop the graph. The runner carries the question to the surface and comes back."""
+            # The gate is asked ABOUT something: the deliverable of the step just finished.
+            trace = state.get("trace", [])
+            previous = trace[-1] if trace else ""
             question = {
                 "gate": kind,
                 "step": row["step"],
@@ -254,6 +257,11 @@ def compile_flow(flow_name: str, engine: EngineWrapper, effects: EffectLog, gate
                 "action": substitute(row.get("action", ""), state.get("params", {})),
                 "output": row.get("output", ""),
                 "flow": row["flow_name"],
+                "deliverable": state.get("outputs", {}).get(previous, ""),
+                "deliverable_step": previous,
+                # WHO submitted it. A gate that does not name the submitting agent asks
+                # Yakov to judge work with no author on it (#6600).
+                "deliverable_actor": next((r["actor"] for r in rows if r["step"] == previous), ""),
             }
             while True:
                 try:

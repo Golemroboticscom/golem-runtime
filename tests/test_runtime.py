@@ -537,3 +537,47 @@ def test_the_flow_table_carries_the_column_and_it_is_empty_by_default():
 def test_the_iron_rule_survives_the_per_step_engine():
     """A step naming an engine is a TABLE speaking. The caller still may not."""
     assert engine.call_signature_forbids_model()
+
+
+def test_a_gate_carries_the_deliverable_it_is_asking_about(tmp_path):
+    """Yakov pressed approve on "Approve the mission spec" with no spec attached (#6598).
+
+    A gate that shows only its own headline asks a human to sign an unread page. It must
+    carry the output of the step that just finished.
+    """
+    gate = AutoGate()
+    make_run(tmp_path, "deliverable", gate=gate).execute(fixture_params(FLOW))
+    asked = {request.step: request for request in gate.asked}
+
+    first = asked["4"]
+    assert first.deliverable_step == "3", "gate 4 decides on what step 3 produced"
+    assert first.deliverable, "the gate was asked with nothing to decide on"
+
+    for step, request in asked.items():
+        assert request.deliverable_step, f"gate {step} names no deliverable"
+        assert request.deliverable, f"gate {step} carries no deliverable"
+        assert request.deliverable_actor, f"gate {step} does not say who submitted it"
+
+    # And the submitting agent is the actor of the step that produced it, not the gate's.
+    assert first.deliverable_actor == next(r["actor"] for r in tables.flow(FLOW) if r["step"] == "3")
+    assert first.actor == "Yakov"
+
+
+def test_the_gate_question_shows_the_deliverable_and_says_so_when_truncated():
+    from golem_runtime.gates import GateRequest, TelegramGate
+
+    channel = TelegramGate.__new__(TelegramGate)  # no network, no token
+    short = GateRequest("r", "4", "human-gate", "Yakov", action="Approve the mission spec",
+                        deliverable="mass budget: 50 kg", deliverable_step="3")
+    short.deliverable_actor = "Interface"
+    text = channel._question(short)
+    assert "Approve the mission spec" in text
+    assert "mass budget: 50 kg" in text
+    assert "step 3" in text
+    assert "Submitted by: Interface" in text
+
+    long = GateRequest("r", "4", "human-gate", "Yakov", deliverable="x" * 9000, deliverable_step="3")
+    assert "truncated" in channel._question(long)
+
+    empty = GateRequest("r", "4", "human-gate", "Yakov")
+    assert "no deliverable" in channel._question(empty)

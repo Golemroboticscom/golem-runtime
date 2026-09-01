@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from . import tables
@@ -35,6 +36,11 @@ class GateRequest:
     action: str = ""
     output: str = ""
     error: str = ""
+    # WHAT is being approved. A gate without it asks a human to decide about nothing --
+    # Yakov pressed approve on "Approve the mission spec" with no spec attached (#6598).
+    deliverable: str = ""
+    deliverable_step: str = ""
+    deliverable_actor: str = ""
     context: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -110,6 +116,21 @@ class TelegramGate:
 
     def ask(self, request: GateRequest) -> dict[str, str]:
         token = f"{request.run_id}|{request.step}"
+        # The whole deliverable travels as a file when it does not fit in a message. A gate
+        # that shows only a headline is a gate that asks for a signature on an unread page.
+        # The RAW text always travels as a file, whatever its length. The message is a
+        # preview; the file is the thing itself, unformatted and uncut.
+        if request.deliverable:
+            import tempfile
+
+            with tempfile.TemporaryDirectory() as tmp:
+                document = Path(tmp) / f"step-{request.deliverable_step}-{(request.deliverable_actor or 'agent').replace(' ', '-')}.md"
+                document.write_text(request.deliverable, encoding="utf-8")
+                self.telegram.send_document(
+                    document,
+                    f"Gate {request.step} · raw deliverable of step {request.deliverable_step} "
+                    f"· submitted by {request.deliverable_actor or 'unknown'}",
+                )
         buttons = [[{"text": _label(d), "callback_data": f"g|{request.step}|{d}"[:64]} for d in sorted(request.decisions)]]
         message = self.telegram.send(self._question(request), buttons)
         message_id = message["message_id"]
@@ -131,20 +152,36 @@ class TelegramGate:
                 return answer
         raise GateTimeout(f"gate {token} unanswered after {self.timeout_minutes} minutes; the run stays paused")
 
+    EXCERPT = 2200  # what fits in a Telegram message alongside the question
+
     def _question(self, request: GateRequest) -> str:
+        """The question, with the RAW deliverable and the name of who submitted it.
+
+        Raw on purpose (#6600): no summary, no rewrite. What the agent produced is what
+        Yakov judges. Anything else puts a second author between them.
+        """
+        import html
+
         lines = [
             f"<b>Gate {request.step}</b> — {request.kind}",
-            f"run <code>{request.run_id}</code> · actor <b>{request.actor}</b>",
+            f"run <code>{request.run_id}</code>",
         ]
         if request.action:
-            lines.append("")
-            lines.append(request.action[:900])
-        if request.output:
-            lines.append("")
-            lines.append(f"<i>expected output:</i> {request.output[:300]}")
+            lines += ["", f"<b>{html.escape(request.action[:400])}</b>"]
+        if request.deliverable:
+            lines += [
+                "",
+                f"<b>Submitted by: {html.escape(request.deliverable_actor or 'unknown')}</b> "
+                f"· step {request.deliverable_step} · {len(request.deliverable)} chars",
+                "",
+                "<pre>" + html.escape(request.deliverable[: self.EXCERPT]) + "</pre>",
+            ]
+            if len(request.deliverable) > self.EXCERPT:
+                lines.append("<i>…truncated here. The whole raw text is the file above.</i>")
+        else:
+            lines += ["", "<i>(no deliverable was produced before this gate)</i>"]
         if request.error:
-            lines.append("")
-            lines.append(f"⚠ {request.error}")
+            lines += ["", f"⚠ {request.error}"]
         return "\n".join(lines)
 
     def _read(self, update: dict[str, Any], request: GateRequest) -> dict[str, str] | None:
