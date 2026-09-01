@@ -214,3 +214,13 @@ with distinct jobs. The fix is a system prompt ASSEMBLED FROM THE ROW -- role fr
 tools it holds, and the iron rules -- all from tables, nothing hard-coded. Proposed to
 Yakov, not yet built.
 
+## 14. Phase B — a PDF attached to the gate (Yakov #6618)
+
+**Instruction, recorded not built:** in phase B a gate should attach a **PDF**, not a
+markdown file. Today the raw deliverable travels as `.md` and the message carries a
+rendered reading copy.
+
+The old system already has `md2pdf`; this is a port, not an invention. It waits because
+phase A's job is the flow, the gates, the engine calls and the record -- not the format
+of the attachment.
+

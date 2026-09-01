@@ -1,6 +1,6 @@
 id,agent,team,engine,tools,skills,mounts,network,secrets,image,note
 100,— (בעלים אנושי),Yakov,,,,,,,,To lead the system to achieve its goals
-101,Interface Lead,Interface,openai/gpt-5.6-luna>xai/grok-4.5,Read Write Glob Grep Edit WebSearch WebFetch Translate,,/srv/runtime/tables:ro,open,bridge,docker.io/library/python:3.10-slim,"Bridge between the human and the system. Be available in TG, Zoom, App — receive tasks from Yakov, merge them, open task"
+101,Interface Lead,Interface,openai/gpt-5.6-luna>xai/grok-4.5,Read Write Glob Grep Edit WebSearch WebFetch Translate,,/srv/runtime/tables:ro;${product_path}:rw,open,bridge,docker.io/library/python:3.10-slim,"Bridge between the human and the system. Be available in TG, Zoom, App — receive tasks from Yakov, merge them, open task"
 102,Human Awareness,Interface,openai/gpt-5.6-luna>xai/grok-4.5,Read,,/srv/runtime/tables:ro,open,bridge,docker.io/library/python:3.10-slim,Predict the human user's (currently Yakov) state and adapt the output format/timing accordingly
 103,STT Correction,Interface,openai/gpt-5.6-luna>xai/grok-4.5,Read,,/srv/runtime/tables:ro,open,bridge,docker.io/library/python:3.10-slim,Fix mis-transcribed words in voice messages from context
 104,Data gathering,Research Center,openai/gpt-5.6-luna>xai/grok-4.5,WebSearch WebFetch ImageSearch YouTube OCR Translate Read Write Glob Grep Vision,,/srv/runtime/tables:ro;${product_path}:rw,open,bridge,docker.io/library/python:3.10-slim,Gathers the relevant data and organizes it into a usable package

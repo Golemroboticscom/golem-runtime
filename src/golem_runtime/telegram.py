@@ -12,7 +12,9 @@ a fact in the code: swap `bot_token` and nothing else moves.
 """
 from __future__ import annotations
 
+import html
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -39,6 +41,30 @@ def load_config(path: Path | None = None) -> dict[str, str]:
         if not config.get(key):
             raise TelegramNotConfigured(f"{path} has no {key}")
     return config
+
+
+def as_telegram_html(markdown: str) -> str:
+    """Render an agent's markdown the way Telegram can actually show it.
+
+    The deliverables come back as markdown -- `# heading`, `**bold**`, `- item`. Dropped
+    into a message unrendered, Yakov sees the asterisks and hashes themselves, which is
+    what he flagged (#6618): "no bold and it is not comfortable to read; it should look
+    like the messages you send me." My own messages read well because they are HTML.
+
+    The RAW text is not lost: the attached file is untouched. This is the reading copy.
+    """
+    out = html.escape(markdown)
+    # [ \t] and never \s: in MULTILINE, \s matches the newline itself, so a heading
+    # pattern anchored with \s*$ swallows the blank line after it and welds two headings
+    # together. Caught on the first render.
+    out = re.sub(r"^[ \t]{0,3}#{1,6}[ \t]+(.+?)[ \t]*$", r"<b>\1</b>", out, flags=re.M)
+    out = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out, flags=re.S)                # **bold**
+    out = re.sub(r"(?<![\w*])\*(?!\s)([^*\n]+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", out)  # *italic*
+    out = re.sub(r"`([^`\n]+?)`", r"<code>\1</code>", out)                        # `code`
+    out = re.sub(r"^[ \t]{0,4}[-*+][ \t]+", "• ", out, flags=re.M)                 # bullets
+    out = re.sub(r"^[ \t]*[-*_]{3,}[ \t]*$", "──────────", out, flags=re.M)       # rules
+    out = re.sub(r"\n{3,}", "\n\n", out)                                          # breathing room
+    return out.strip()
 
 
 class Telegram:

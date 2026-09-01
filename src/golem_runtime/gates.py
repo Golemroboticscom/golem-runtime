@@ -164,6 +164,8 @@ class TelegramGate:
         """
         import html
 
+        from .telegram import as_telegram_html
+
         # NOT <pre>. Telegram draws a code block with a TRANSLUCENT background, so the chat
         # wallpaper shows through it as a bright band down the middle -- which is the white
         # stripe Yakov photographed (#6605), and it appeared only in these messages because
@@ -176,7 +178,9 @@ class TelegramGate:
                 f"👤 <b>{html.escape(request.deliverable_actor or 'unknown')}</b>  ·  "
                 f"step {request.deliverable_step}  ·  {len(request.deliverable):,} chars",
                 "",
-                "<blockquote expandable>" + html.escape(request.deliverable[: self.EXCERPT]) + "</blockquote>",
+                # Rendered, not dumped: the markdown becomes real bold and real bullets.
+                # The attached file above is still the untouched raw text.
+                "<blockquote expandable>" + as_telegram_html(request.deliverable[: self.EXCERPT]) + "</blockquote>",
             ]
             if len(request.deliverable) > self.EXCERPT:
                 lines.append("<i>…cut here. The whole raw text is the file above.</i>")

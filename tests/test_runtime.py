@@ -614,3 +614,23 @@ def test_the_gate_question_shows_the_deliverable_and_says_so_when_truncated():
 
     empty = GateRequest("r", "4", "human-gate", "Yakov")
     assert "no deliverable" in channel._question(empty)
+
+
+def test_the_deliverable_is_rendered_not_dumped():
+    """Yakov: "no bold, not comfortable to read; it should look like the messages you send
+    me" (#6618). The agents write markdown; Telegram shows the asterisks unless it is
+    rendered first. The attached file stays raw."""
+    from golem_runtime.telegram import as_telegram_html
+
+    rendered = as_telegram_html("# Title\n\n## Status\n\n**In Progress**\n\n- one\n- **two**\n")
+    assert "<b>Title</b>" in rendered and "<b>Status</b>" in rendered
+    assert "<b>In Progress</b>" in rendered
+    assert "• one" in rendered and "• <b>two</b>" in rendered
+    assert "**" not in rendered and "#" not in rendered
+
+    # A heading must not swallow the blank line after it and weld onto the next.
+    assert "<b>Title</b><b>Status</b>" not in rendered
+    assert rendered.count("\n") >= 4
+
+    # And anything that looks like a tag is escaped before any of this runs.
+    assert "&lt;script&gt;" in as_telegram_html("<script>")
